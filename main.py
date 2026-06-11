@@ -77,22 +77,23 @@ def analyze_image_with_logmeal(image_bytes: bytes) -> str:
 
         rec_json = safe_json(rec_response)
         image_id = None
+        dish_name = "Неизвестное блюдо"
+
         if isinstance(rec_json, dict):
             image_id = rec_json.get("imageId") or rec_json.get("image_id") or rec_json.get("id")
 
-        dishes = extract_list(rec_json)
+            items = extract_list(rec_json)
+            if items:
+                dish_name = get_name(items[0])
+
+            food_name = rec_json.get("foodName")
+            if isinstance(food_name, list) and food_name:
+                dish_name = str(food_name[0])
+            elif isinstance(food_name, str) and food_name.strip():
+                dish_name = food_name.strip()
 
         lines = []
-        if image_id:
-            lines.append(f"imageId: {image_id}")
-
-        if dishes:
-            lines.append("Распознанные блюда:")
-            for i, item in enumerate(dishes[:5], 1):
-                lines.append(f"{i}. {get_name(item)}")
-        else:
-            lines.append("Не удалось извлечь блюда из ответа API.")
-            lines.append(f"Ответ API: {rec_json}")
+        lines.append(f"Распознанное блюдо: {dish_name}")
 
         if image_id:
             nutri_url = "https://api.logmeal.com/v2/nutrition/recipe/nutritionalInfo"
@@ -103,27 +104,50 @@ def analyze_image_with_logmeal(image_bytes: bytes) -> str:
                 timeout=120
             )
 
-            lines.append("")
-            lines.append("Нутриенты:")
-
             if nutri_response.status_code == 200:
                 nutri_json = safe_json(nutri_response)
+
                 if isinstance(nutri_json, dict):
-                    found = False
-                    for key in ["calories", "energy", "protein", "fat", "carbs", "carbohydrates"]:
-                        if key in nutri_json:
-                            lines.append(f"{key}: {nutri_json[key]}")
-                            found = True
-                    if not found:
-                        lines.append(str(nutri_json))
+                    info = nutri_json.get("nutritional_info", {})
+                    total = info.get("totalNutrients", {})
+
+                    calories = total.get("ENERC_KCAL", {}).get("quantity")
+                    protein = total.get("PROCNT", {}).get("quantity")
+                    fat = total.get("FAT", {}).get("quantity")
+                    carbs = total.get("CHOCDF", {}).get("quantity")
+                    fiber = total.get("FIBTG", {}).get("quantity")
+                    sugar = total.get("SUGAR", {}).get("quantity")
+
+                    lines.append("")
+                    lines.append("Пищевая ценность на 100 г:")
+
+                    if calories is not None:
+                        lines.append(f"Калории: {calories} ккал")
+                    if protein is not None:
+                        lines.append(f"Белки: {protein} г")
+                    if fat is not None:
+                        lines.append(f"Жиры: {fat} г")
+                    if carbs is not None:
+                        lines.append(f"Углеводы: {carbs} г")
+                    if fiber is not None:
+                        lines.append(f"Клетчатка: {fiber} г")
+                    if sugar is not None:
+                        lines.append(f"Сахар: {sugar} г")
+
+                    nutri_score = nutri_json.get("image_nutri_score", {})
+                    if isinstance(nutri_score, dict):
+                        score = nutri_score.get("nutri_score_category")
+                        if score:
+                            lines.append(f"Nutri-Score: {score}")
                 else:
-                    lines.append(str(nutri_json))
+                    lines.append("")
+                    lines.append("Не удалось разобрать данные о питательности.")
             else:
+                lines.append("")
                 lines.append(f"Не удалось получить нутриенты: {nutri_response.status_code}")
-                lines.append(nutri_response.text)
 
         lines.append("")
-        lines.append("Если хотите, могу добавить оценку под цель: похудение / поддержание / набор.")
+        lines.append("Если хочешь, могу еще добавить оценку под цель: похудение, поддержание или набор.")
         return "\n".join(lines)
 
     except Exception as e:
