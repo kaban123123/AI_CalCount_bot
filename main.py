@@ -11,10 +11,18 @@ LOGMEAL_TOKEN = os.environ.get("LOGMEAL_TOKEN", "").strip()
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
+user_goals = {}
+
+GOAL_CALORIES = {
+    "Похудение": 1600,
+    "Поддержание": 2200,
+    "Набор": 2800,
+}
+
 menu = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="Анализ блюда")],
-        [KeyboardButton(text="Помощь")],
+        [KeyboardButton(text="Похудение"), KeyboardButton(text="Поддержание"), KeyboardButton(text="Набор")],
+        [KeyboardButton(text="Анализ блюда"), KeyboardButton(text="Помощь")],
     ],
     resize_keyboard=True
 )
@@ -58,19 +66,25 @@ def get_name(item):
             return ", ".join(map(str, fg))
     return "Неизвестное блюдо"
 
+def extract_nutrients(nutri_json):
+    info = nutri_json.get("nutritional_info", {})
+    total = info.get("totalNutrients", {})
+
+    calories = total.get("ENERC_KCAL", {}).get("quantity")
+    protein = total.get("PROCNT", {}).get("quantity")
+    fat = total.get("FAT", {}).get("quantity")
+    carbs = total.get("CHOCDF", {}).get("quantity")
+    fiber = total.get("FIBTG", {}).get("quantity")
+    sugar = total.get("SUGAR", {}).get("quantity")
+    score = nutri_json.get("image_nutri_score", {}).get("nutri_score_category")
+
+    return calories, protein, fat, carbs, fiber, sugar, score
+
 def analyze_image_with_logmeal(image_bytes: bytes) -> str:
     try:
-        files = {
-            "image": ("meal.jpg", image_bytes, "image/jpeg")
-        }
-
+        files = {"image": ("meal.jpg", image_bytes, "image/jpeg")}
         rec_url = "https://api.logmeal.com/v2/image/segmentation/complete"
-        rec_response = requests.post(
-            rec_url,
-            headers=logmeal_headers(),
-            files=files,
-            timeout=120
-        )
+        rec_response = requests.post(rec_url, headers=logmeal_headers(), files=files, timeout=120)
 
         if rec_response.status_code != 200:
             return f"Ошибка распознавания: {rec_response.status_code}\n{rec_response.text}"
@@ -92,8 +106,7 @@ def analyze_image_with_logmeal(image_bytes: bytes) -> str:
             elif isinstance(food_name, str) and food_name.strip():
                 dish_name = food_name.strip()
 
-        lines = []
-        lines.append(f"Распознанное блюдо: {dish_name}")
+        lines = [f"Распознанное блюдо: {dish_name}"]
 
         if image_id:
             nutri_url = "https://api.logmeal.com/v2/nutrition/recipe/nutritionalInfo"
@@ -108,15 +121,10 @@ def analyze_image_with_logmeal(image_bytes: bytes) -> str:
                 nutri_json = safe_json(nutri_response)
 
                 if isinstance(nutri_json, dict):
-                    info = nutri_json.get("nutritional_info", {})
-                    total = info.get("totalNutrients", {})
+                    calories, protein, fat, carbs, fiber,
 
-                    calories = total.get("ENERC_KCAL", {}).get("quantity")
-                    protein = total.get("PROCNT", {}).get("quantity")
-                    fat = total.get("FAT", {}).get("quantity")
-                    carbs = total.get("CHOCDF", {}).get("quantity")
-                    fiber = total.get("FIBTG", {}).get("quantity")
-                    sugar = total.get("SUGAR", {}).get("quantity")
+
+sugar, score = extract_nutrients(nutri_json)
 
                     lines.append("")
                     lines.append("Пищевая ценность на 100 г:")
@@ -133,12 +141,8 @@ def analyze_image_with_logmeal(image_bytes: bytes) -> str:
                         lines.append(f"Клетчатка: {fiber} г")
                     if sugar is not None:
                         lines.append(f"Сахар: {sugar} г")
-
-                    nutri_score = nutri_json.get("image_nutri_score", {})
-                    if isinstance(nutri_score, dict):
-                        score = nutri_score.get("nutri_score_category")
-                        if score:
-                            lines.append(f"Nutri-Score: {score}")
+                    if score:
+                        lines.append(f"Nutri-Score: {score}")
                 else:
                     lines.append("")
                     lines.append("Не удалось разобрать данные о питательности.")
@@ -147,7 +151,7 @@ def analyze_image_with_logmeal(image_bytes: bytes) -> str:
                 lines.append(f"Не удалось получить нутриенты: {nutri_response.status_code}")
 
         lines.append("")
-        lines.append("Если хочешь, могу еще добавить оценку под цель: похудение, поддержание или набор.")
+        lines.append("Выбери цель кнопкой снизу, и я буду сравнивать блюда с твоей нормой.")
         return "\n".join(lines)
 
     except Exception as e:
@@ -157,14 +161,25 @@ def analyze_image_with_logmeal(image_bytes: bytes) -> str:
 async def start_handler(message: Message):
     await message.answer(
         "Привет! Я AI_CalCount_bot.\n"
-        "Нажми «Анализ блюда» и отправь фото еды.",
+        "Сначала выбери цель: Похудение, Поддержание или Набор.",
         reply_markup=menu
+    )
+
+@dp.message(F.text.in_(["Похудение", "Поддержание", "Набор"]))
+async def goal_handler(message: Message):
+    user_goals[message.from_user.id] = message.text
+    daily = GOAL_CALORIES[message.text]
+    await message.answer(
+        f"Цель установлена: {message.text}\n"
+        f"Дневная норма: {daily} ккал.\n"
+        f"Теперь отправь фото блюда."
     )
 
 @dp.message(F.text == "Помощь")
 async def help_handler(message: Message):
     await message.answer(
-        "Отправь фото блюда, и я покажу примерную оценку калорий и БЖУ."
+        "Сначала выбери цель, потом отправь фото еды.\n"
+        "Я покажу калории и сравню с твоей дневной нормой."
     )
 
 @dp.message(F.text == "Анализ блюда")
@@ -182,12 +197,29 @@ async def photo_handler(message: Message):
 
     result_text = analyze_image_with_logmeal(image_data)
 
+    goal = user_goals.get(message.from_user.id)
+    if goal:
+        daily = GOAL_CALORIES.get(goal)
+        calories = None
+
+        for line in result_text.splitlines():
+            if line.startswith("Калории:"):
+                try:
+                    calories = float(line.split(":", 1)[1].strip().split()[0])
+                except Exception:
+                    pass
+                break
+
+        if calories is not None and daily:
+            percent = round((calories / daily) * 100, 1)
+            result_text += f"\n\nЭто примерно {percent}% от дневной нормы для цели «{goal}» ({daily} ккал)."
+
     for part in split_text(result_text):
         await message.answer(part)
 
 @dp.message()
 async def other_messages(message: Message):
-    await message.answer("Нажми «Анализ блюда» или отправь фото еды.", reply_markup=menu)
+    await message.answer("Сначала выбери цель: Похудение, Поддержание или Набор.", reply_markup=menu)
 
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
