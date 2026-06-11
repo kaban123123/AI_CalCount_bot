@@ -122,7 +122,7 @@ def analyze_image_with_logmeal(image_bytes: bytes) -> str:
                 lines.append(f"Не удалось получить нутриенты: {nutri_response.status_code}")
                 lines.append(nutri_response.text)
 
-       lines.append("")
+        lines.append("")
         lines.append("Если хотите, могу добавить оценку под цель: похудение / поддержание / набор.")
         return "\n".join(lines)
 
