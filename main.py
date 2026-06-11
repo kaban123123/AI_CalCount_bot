@@ -19,6 +19,9 @@ menu = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
+def split_text(text, limit=4000):
+    return [text[i:i + limit] for i in range(0, len(text), limit)]
+
 def logmeal_headers():
     return {
         "Authorization": f"Bearer {LOGMEAL_TOKEN}",
@@ -120,14 +123,16 @@ def analyze_image_with_logmeal(image_bytes: bytes) -> str:
                 lines.append(nutri_response.text)
 
         lines.append("")
-        lines.append("Если хотите, могу добавить оценку под цель: похудение / поддержание / набор.")
+        lines.append("Если хотите, могу добавить оценку под цель: похудение / поддержание / набор.
+
+
+)
         return "\n".join(lines)
 
     except Exception as e:
         return f"Ошибка анализа: {e}"
 
-
-dp.message(CommandStart())
+@dp.message(CommandStart())
 async def start_handler(message: Message):
     await message.answer(
         "Привет! Я AI_CalCount_bot.\n"
@@ -137,7 +142,9 @@ async def start_handler(message: Message):
 
 @dp.message(F.text == "Помощь")
 async def help_handler(message: Message):
-    await message.answer("Отправь фото блюда, и я покажу примерную оценку калорий и БЖУ.")
+    await message.answer(
+        "Отправь фото блюда, и я покажу примерную оценку калорий и БЖУ."
+    )
 
 @dp.message(F.text == "Анализ блюда")
 async def analyze_hint(message: Message):
@@ -153,7 +160,9 @@ async def photo_handler(message: Message):
     image_data = file_bytes.read()
 
     result_text = analyze_image_with_logmeal(image_data)
-    await message.answer(result_text)
+
+    for part in split_text(result_text):
+        await message.answer(part)
 
 @dp.message()
 async def other_messages(message: Message):
@@ -164,4 +173,4 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main())"
