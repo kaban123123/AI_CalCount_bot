@@ -28,58 +28,59 @@ def logmeal_headers():
         "accept": "application/json",
     }
 
-def safe_json_text(resp):
+def safe_json(resp):
     try:
         return resp.json()
     except Exception:
         return resp.text
 
-def extract_items(obj):
-    if isinstance(obj, dict):
-        for key in ["segmentationResults", "segmentation_results", "predictions", "results", "dishPredictions", "foodSpots", "food_spots", "segments", "items"]:
-            value = obj.get(key)
+def extract_list(data):
+    if isinstance(data, dict):
+        for key in [
+            "segmentationResults", "segmentation_results", "predictions",
+            "results", "dishPredictions", "foodSpots", "food_spots",
+            "segments", "items"
+        ]:
+            value = data.get(key)
             if isinstance(value, list) and value:
                 return value
     return []
 
-def item_name(item):
+def get_name(item):
     if isinstance(item, str):
         return item
     if isinstance(item, dict):
         for key in ["name", "dish", "label", "food", "title", "className", "dish_name"]:
             if item.get(key):
                 return str(item[key])
-        if isinstance(item.get("food_groups"), list) and item["food_groups"]:
-            return ", ".join(map(str, item["food_groups"]))
+        fg = item.get("food_groups")
+        if isinstance(fg, list) and fg:
+            return ", ".join(map(str, fg))
     return "Неизвестное блюдо"
-
-def first_available(dct, keys):
-    if not isinstance(dct, dict):
-        return None
-    for k in keys:
-        if k in dct and dct[k] not in (None, "", [], {}):
-            return dct[k]
-    return None
 
 def analyze_image_with_logmeal(image_bytes: bytes) -> str:
     try:
-        files = {"image": ("meal.jpg", image_bytes, "image/jpeg")}
+        files = {
+            "image": ("meal.jpg", image_bytes, "image/jpeg")
+        }
 
         rec_url = "https://api.logmeal.com/v2/image/segmentation/complete"
         rec_response = requests.post(
             rec_url,
             headers=logmeal_headers(),
             files=files,
-            timeout=120,
-            verify=True
+            timeout=120
         )
 
         if rec_response.status_code != 200:
             return f"Ошибка распознавания: {rec_response.status_code}\n{rec_response.text}"
 
-        rec_json = safe_json_text(rec_response)
-        image_id = first_available(rec_json, ["imageId", "image_id", "id"])
-        dishes = extract_items(rec_json)
+        rec_json = safe_json(rec_response)
+        image_id = None
+        if isinstance(rec_json, dict):
+            image_id = rec_json.get("imageId") or rec_json.get("image_id") or rec_json.get("id")
+
+        dishes = extract_list(rec_json)
 
         lines = []
         if image_id:
@@ -88,66 +89,45 @@ def analyze_image_with_logmeal(image_bytes: bytes) -> str:
         if dishes:
             lines.append("Распознанные блюда:")
             for i, item in enumerate(dishes[:5], 1):
-                lines.append(f"{i}. {item_name(item)}")
+                lines.append(f"{i}. {get_name(item)}")
         else:
-            lines.append("Распознанные блюда не найдены в ответе API.")
+            lines.append("Не удалось извлечь блюда из ответа API.")
             lines.append(f"Ответ API: {rec_json}")
 
-        ingredients_text = None
-        if image_id:
-            ing_url = "https://api.logmeal.com/v2/nutrition/recipe/ingredients"
-            ing_response = requests.post(
-                ing_url,
-                headers={**logmeal_headers(), "Content-Type": "application/json"},
-                json={"imageId": image_id},
-                timeout=120,
-                verify=True
-            )
-            if ing_response.status_code == 200:
-                ingredients_text = safe_json_text(ing_response)
-            else:
-                ingredients_text = f"Не удалось получить ingredients: {ing_response.status_code}\n{ing_response.text}"
-
-        if ingredients_text is not None:
-            lines.append("")
-            lines.append("Ингредиенты / детали:")
-            lines.append(str(ingredients_text))
-
-        nutri_text = None
         if image_id:
             nutri_url = "https://api.logmeal.com/v2/nutrition/recipe/nutritionalInfo"
             nutri_response = requests.post(
                 nutri_url,
-                headers={**logmeal_headers(), "Content-Type": "application/json"},
+                headers=logmeal_headers(),
                 json={"imageId": image_id},
-
-
-0,
-                verify=True
+                timeout=120
             )
-            if nutri_response.status_code == 200:
-                nutri_text = safe_json_text(nutri_response)
-            else:
-                nutri_text = f"Не удалось получить нутриенты: {nutri_response.status_code}\n{nutri_response.text}"
 
-        if nutri_text is not None:
             lines.append("")
             lines.append("Нутриенты:")
-            if isinstance(nutri_text, dict):
-                found = False
-                for key in ["calories", "energy", "protein", "fat", "carbs", "carbohydrates"]:
-                    val = nutri_text.get(key)
-                    if val is not None:
-                        lines.append(f"{key}: {val}")
-                        found = True
-                if not found:
-                    lines.append(str(nutri_text))
+
+            if nutri_response.status_code == 200:
+                nutri_json = safe_json(nutri_response)
+                if isinstance(nutri_json, dict):
+                    found = False
+                    for key in ["calories", "energy", "protein", "fat", "carbs", "carbohydrates"]:
+                        if key in nutri_json:
+                            lines.append(f"{key}: {nutri_json[key]}")
+                            found = True
+                    if not found:
+                        lines.append(str(nutri_json))
+                else:
+                    lines.append(str(nutri_json))
             else:
-                lines.append(str(nutri_text))
+                lines.append(f"Не удалось получить нутриенты: {nutri_response.status_code}")
+                lines.append(nutri_response.text)
 
         lines.append("")
         lines.append("Если хотите, могу добавить оценку под цель: похудение / поддержание / набор.")
-        return "\n".join(lines)
+        return
+
+
+\n".join(lines)
 
     except Exception as e:
         return f"Ошибка анализа: {e}"
@@ -191,4 +171,4 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main()) timeout=12
+    asyncio.run(main())"
