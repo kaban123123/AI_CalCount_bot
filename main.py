@@ -1,12 +1,9 @@
 import asyncio
 import os
-import urllib3
 import requests
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
-
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 API_TOKEN = os.environ.get("TG_TOKEN", "").strip()
 LOGMEAL_TOKEN = os.environ.get("LOGMEAL_TOKEN", "").strip()
@@ -124,15 +121,13 @@ def analyze_image_with_logmeal(image_bytes: bytes) -> str:
 
         lines.append("")
         lines.append("Если хотите, могу добавить оценку под цель: похудение / поддержание / набор.")
-        return
-
-
-\n".join(lines)
+        return "\n".join(lines)
 
     except Exception as e:
         return f"Ошибка анализа: {e}"
 
-@dp.message(CommandStart())
+
+dp.message(CommandStart())
 async def start_handler(message: Message):
     await message.answer(
         "Привет! Я AI_CalCount_bot.\n"
@@ -142,9 +137,7 @@ async def start_handler(message: Message):
 
 @dp.message(F.text == "Помощь")
 async def help_handler(message: Message):
-    await message.answer(
-        "Отправь фото блюда, и я покажу примерную оценку калорий и БЖУ."
-    )
+    await message.answer("Отправь фото блюда, и я покажу примерную оценку калорий и БЖУ.")
 
 @dp.message(F.text == "Анализ блюда")
 async def analyze_hint(message: Message):
@@ -171,4 +164,4 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())"
+    asyncio.run(main())@
