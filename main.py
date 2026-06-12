@@ -10,7 +10,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, BotCommand
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, BotCommand, ReplyKeyboardRemove
 
 # ==================== ЛОГИРОВАНИЕ ====================
 logging.basicConfig(
@@ -93,7 +93,7 @@ gender_menu = ReplyKeyboardMarkup(
         [KeyboardButton(text="Мужской"), KeyboardButton(text="Женский")],
     ],
     resize_keyboard=True,
-    is_persistent=True,
+    is_persistent=False,
 )
 
 # Выбор активности
@@ -102,11 +102,11 @@ activity_menu = ReplyKeyboardMarkup(
         [KeyboardButton(text="Сидячий образ жизни")],
         [KeyboardButton(text="Легкая активность")],
         [KeyboardButton(text="Средняя активность")],
-        [KeyboardButton(text="Высокая ��ктивность")],
+        [KeyboardButton(text="Высокая активность")],
         [KeyboardButton(text="Очень высокая активность")],
     ],
     resize_keyboard=True,
-    is_persistent=True,
+    is_persistent=False,
 )
 
 # Выбор цели
@@ -117,7 +117,16 @@ goal_menu = ReplyKeyboardMarkup(
         [KeyboardButton(text="Набор")],
     ],
     resize_keyboard=True,
-    is_persistent=True,
+    is_persistent=False,
+)
+
+# Подтверждение удаления профиля
+confirm_delete_menu = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="✅ Да, удалить"), KeyboardButton(text="❌ Отмена")],
+    ],
+    resize_keyboard=True,
+    is_persistent=False,
 )
 
 # ==================== FSM STATES ====================
@@ -128,6 +137,9 @@ class ProfileForm(StatesGroup):
     weight = State()
     activity = State()
     goal = State()
+
+class DeleteProfileForm(StatesGroup):
+    confirm = State()
 
 class PortionForm(StatesGroup):
     dish_name = State()
@@ -585,14 +597,40 @@ async def edit_profile_button(message: Message, state: FSMContext):
     await message.answer("Выбери пол:", reply_markup=gender_menu)
 
 @dp.message(F.text == "🗑️ Удалить профиль")
-async def delete_profile_button(message: Message, state: FSMContext):
-    """Удаление профиля"""
+async def delete_profile_start(message: Message, state: FSMContext):
+    """Начало процесса удаления профиля"""
+    profile = get_profile(message.from_user.id)
+    if not profile:
+        await message.answer("У тебя нет профиля для удаления!", reply_markup=profile_menu)
+        return
+    
+    await state.set_state(DeleteProfileForm.confirm)
+    await message.answer(
+        "⚠️ Ты уверен? Это действие необратимо!\n\n"
+        "Профиль и вся история будут удалены.",
+        reply_markup=confirm_delete_menu
+    )
+
+@dp.message(DeleteProfileForm.confirm, F.text == "✅ Да, удалить")
+async def confirm_delete_profile(message: Message, state: FSMContext):
+    """Подтверждение удаления профиля"""
     delete_profile(message.from_user.id)
     await state.clear()
     await message.answer(
-        "🗑️ Профиль удален.\n\n"
+        "🗑️ Профиль успешно удален.\n\n"
         "Нажми 📊 Профиль для создания нового.",
         reply_markup=main_menu
+    )
+
+@dp.message(DeleteProfileForm.confirm, F.text == "❌ Отмена")
+async def cancel_delete_profile(message: Message, state: FSMContext):
+    """Отмена удаления профиля"""
+    await state.clear()
+    profile = get_profile(message.from_user.id)
+    await message.answer(
+        f"Отмена удаления.\n\n"
+        f"{profile_summary(profile, message.from_user.id)}",
+        reply_markup=profile_menu
     )
 
 @dp.message(F.text == "◀️ Назад в меню")
@@ -608,7 +646,11 @@ async def profile_sex(message: Message, state: FSMContext):
     """Ввод пола"""
     await state.update_data(sex=message.text)
     await state.set_state(ProfileForm.age)
-    await message.answer("Введи возраст числом (10-100):")
+    await message.answer(
+        f"✅ Пол: {message.text}\n\n"
+        f"Введи возраст числом (10-100):",
+        reply_markup=ReplyKeyboardRemove()
+    )
 
 @dp.message(ProfileForm.age)
 async def profile_age(message: Message, state: FSMContext):
@@ -660,7 +702,11 @@ async def profile_activity(message: Message, state: FSMContext):
         return
     await state.update_data(activity=message.text)
     await state.set_state(ProfileForm.goal)
-    await message.answer("Выбери свою цель:", reply_markup=goal_menu)
+    await message.answer(
+        f"✅ Активность: {message.text}\n\n"
+        f"Выбери свою цель:",
+        reply_markup=goal_menu
+    )
 
 @dp.message(ProfileForm.goal)
 async def profile_goal(message: Message, state: FSMContext):
@@ -678,8 +724,9 @@ async def profile_goal(message: Message, state: FSMContext):
         f"✅ Профиль сохранен!\n\n"
         f"{profile_summary(data, message.from_user.id)}\n"
         f"Отлично! Теперь ты можешь анализировать блюда! 🍽️",
-        reply_markup=main_menu
+        reply_markup=ReplyKeyboardRemove()
     )
+    await message.answer("Выбери действие:", reply_markup=main_menu)
 
 # ==================== ОБРАБОТЧИКИ РУЧНОГО ВВОДА ====================
 
