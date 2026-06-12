@@ -11,8 +11,6 @@ from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, BotCommand, ReplyKeyboardRemove
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
 
 # ==================== ЛОГИРОВАНИЕ ====================
 logging.basicConfig(
@@ -39,7 +37,6 @@ logger.info(f"✅ LOGMEAL_TOKEN present: {bool(LOGMEAL_TOKEN)}")
 # ==================== ИНИЦИАЛИЗАЦИЯ БОТА ====================
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
-scheduler = AsyncIOScheduler()
 
 # ==================== ПУТИ И ФАЙЛЫ ====================
 BASE_DIR = Path(__file__).resolve().parent
@@ -90,7 +87,6 @@ main_menu = ReplyKeyboardMarkup(
         [KeyboardButton(text="📜 История")],
         [KeyboardButton(text="📈 Статистика")],
         [KeyboardButton(text="🏃 Упражнения")],
-        [KeyboardButton(text="🔔 Уведомления")],
         [KeyboardButton(text="❓ Помощь")],
     ],
     resize_keyboard=True,
@@ -175,17 +171,6 @@ period_menu = ReplyKeyboardMarkup(
     is_persistent=False,
 )
 
-notification_menu = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="✅ Включить уведомления")],
-        [KeyboardButton(text="❌ Отключить уведомления")],
-        [KeyboardButton(text="⏰ Установить время")],
-        [KeyboardButton(text="◀️ Назад")],
-    ],
-    resize_keyboard=True,
-    is_persistent=False,
-)
-
 # ==================== FSM STATES ====================
 class ProfileForm(StatesGroup):
     sex = State()
@@ -206,9 +191,6 @@ class PortionForm(StatesGroup):
     dish_name = State()
     calories_per_100 = State()
     portion_grams = State()
-
-class NotificationForm(StatesGroup):
-    time = State()
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
@@ -547,9 +529,6 @@ def get_statistics(uid, period="day"):
         return f"📊 Нет данных {period_name}"
     
     total_calories = 0
-    total_protein = 0
-    total_fat = 0
-    total_carbs = 0
     meals_count = len(meals)
     
     for meal in meals:
@@ -560,13 +539,14 @@ def get_statistics(uid, period="day"):
     
     goal = get_goal(uid)
     target = get_target_calories(profile, goal)
+    avg_per_day = total_calories // (meals_count // 1 or 1) if period != "day" else total_calories
     percent = round((total_calories / (target * (meals_count // 1 or 1))) * 100, 1) if target > 0 else 0
     
     stats = (
         f"📊 Статистика {period_name}\n\n"
         f"🔢 Приемов пищи: {meals_count}\n"
         f"🍽 Всего калорий: {total_calories:.0f} ккал\n"
-        f"🎯 Среднее в день: {total_calories // (meals_count // 1 or 1):.0f} ккал\n"
+        f"🎯 Среднее в день: {avg_per_day:.0f} ккал\n"
         f"📈 % от нормы: {percent}%\n"
     )
     
@@ -590,11 +570,10 @@ async def start_handler(message: Message, state: FSMContext):
             "👋 Привет! Я AI_CalCount_bot PRO 🚀\n"
             "🍽️ Продвинутый помощник для подсчета калорий и фитнеса!\n\n"
             "⭐ Новые функции:\n"
-            "✅ Статистика и графики\n"
-            "✅ Уведомления и напоминания\n"
+            "✅ Статистика и аналитика\n"
             "✅ Избранные блюда\n"
             "✅ Упражнения и сжигание калорий\n"
-            "✅ Достижения и прогресс\n\n"
+            "✅ История приемов пищи\n\n"
             "⭐ Сначала создай свой профиль!",
             reply_markup=main_menu
         )
@@ -749,29 +728,6 @@ async def exercise_duration(message: Message, state: FSMContext):
     
     await message.answer(result_text, reply_markup=main_menu)
 
-@dp.message(StateFilter(None), F.text == "🔔 Уведомления")
-async def notifications_button(message: Message):
-    """Нажатие кнопки 'Уведомления'"""
-    await message.answer("Управление уведомлениями:", reply_markup=notification_menu)
-
-@dp.message(StateFilter(None), F.text == "✅ Включить уведомления")
-async def enable_notifications(message: Message):
-    """Включить уведомления"""
-    key = str(message.from_user.id)
-    user_settings.setdefault(key, {})
-    user_settings[key]["notifications"] = True
-    save_state()
-    await message.answer("✅ Уведомления включены!", reply_markup=main_menu)
-
-@dp.message(StateFilter(None), F.text == "❌ Отключить уведомления")
-async def disable_notifications(message: Message):
-    """Отключить уведомления"""
-    key = str(message.from_user.id)
-    user_settings.setdefault(key, {})
-    user_settings[key]["notifications"] = False
-    save_state()
-    await message.answer("❌ Уведомления отключены!", reply_markup=main_menu)
-
 @dp.message(StateFilter(None), F.text == "❓ Помощь")
 async def help_button(message: Message):
     """Нажатие кнопки 'Помощь'"""
@@ -782,17 +738,15 @@ async def help_button(message: Message):
         "• Выбери цель (похудение/поддержание/набор)\n\n"
         "📸 АНАЛИЗ БЛЮДА\n"
         "• Отправь фото еды\n"
-        "• Получи калории и нутриенты\n"
-        "• Добавь в избранное ⭐\n\n"
+        "• Получи калории и нутриенты\n\n"
+        "⭐ ИЗБРАННОЕ\n"
+        "• Сохраняй часто используемые блюда\n"
+        "• Быстрый доступ к калориям\n\n"
         "📈 СТАТИСТИКА\n"
-        "• Просмотри прогресс за день/неделю/месяц\n"
-        "• Анализируй тренды\n\n"
+        "• Просмотри прогресс за день/неделю/месяц\n\n"
         "🏃 УПРАЖНЕНИЯ\n"
         "• Добавь выполненные упражнения\n"
         "• Рассчитай сжигаемые калории\n\n"
-        "🔔 УВЕДОМЛЕНИЯ\n"
-        "• Включи напоминания о приемах пищи\n"
-        "• Получай суточный отчет\n\n"
         "💡 Команды:\n"
         "/manual — ручной ввод\n"
         "/start — главное меню",
@@ -1073,20 +1027,6 @@ async def other_messages(message: Message):
         reply_markup=main_menu
     )
 
-# ==================== ЗАДАЧИ SCHEDULER ====================
-
-async def daily_notification(user_id: int):
-    """Отправляет ежедневное уведомление"""
-    try:
-        settings = user_settings.get(str(user_id), {})
-        if not settings.get("notifications"):
-            return
-        
-        stats = get_statistics(user_id, "day")
-        await bot.send_message(user_id, f"📊 Твоя статистика за день:\n\n{stats}", reply_markup=main_menu)
-    except Exception as e:
-        logger.error(f"Error sending notification: {e}")
-
 # ==================== ГЛАВНАЯ ФУНКЦИЯ ====================
 
 async def set_bot_commands():
@@ -1102,10 +1042,6 @@ async def main():
     logger.info("🚀 Запуск AI_CalCount_bot PRO...")
     load_state()
     await set_bot_commands()
-    
-    # Запуск scheduler
-    scheduler.start()
-    
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("✅ Бот запущен!")
     await dp.start_polling(bot)
