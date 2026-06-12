@@ -121,10 +121,7 @@ def analyze_image_with_logmeal(image_bytes: bytes) -> str:
                 nutri_json = safe_json(nutri_response)
 
                 if isinstance(nutri_json, dict):
-                    calories, protein, fat, carbs, fiber,
-
-
-sugar, score = extract_nutrients(nutri_json)
+                    calories, protein, fat, carbs, fiber, sugar, score = extract_nutrients(nutri_json)
 
                     lines.append("")
                     lines.append("Пищевая ценность на 100 г:")
