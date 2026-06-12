@@ -267,14 +267,25 @@ def extract_nutrients(nutri_json):
 
 def calculate_tdee(profile):
     sex = profile.get("sex")
-    age = float(profile.get("age"))
-    height = float(profile.get("height"))
-    weight = float(profile.get("weight"))
+    age = profile.get("age")
+    height = profile.get("height")
+    weight = profile.get("weight")
     activity = profile.get("activity")
+
+    if sex not in ("Мужской", "Женский"):
+        raise ValueError("Некорректный пол")
+    if age is None or height is None or weight is None:
+        raise ValueError("Профиль заполнен не полностью")
+
+    age = float(age)
+    height = float(height)
+    weight = float(weight)
+
     if sex == "Мужской":
         bmr = 10 * weight + 6.25 * height - 5 * age + 5
     else:
         bmr = 10 * weight + 6.25 * height - 5 * age - 161
+
     tdee = bmr * activity_map.get(activity, 1.2)
     return round(bmr), round(tdee)
 
@@ -381,25 +392,38 @@ def get_favorites(uid):
     return favorites.get(str(uid), [])
 
 def profile_summary(profile, uid):
-    bmr, tdee = calculate_tdee(profile)
-    goal = get_goal(uid)
-    target = get_target_calories(profile, goal) if goal else tdee
-    macros_text = ""
-    if goal:
-        _, p_g, f_g, c_g = get_daily_macros(profile, goal)
-        macros_text = f"БЖУ в день: Б {p_g} г / Ж {f_g} г / У {c_g} г\n"
-    return (
-        f"Пол: {profile['sex']}\n"
-        f"Возраст: {profile['age']}\n"
-        f"Рост: {profile['height']} см\n"
-        f"Вес: {profile['weight']} кг\n"
-        f"Активность: {profile['activity']}\n"
-        f"Цель: {goal if goal else 'Не установлена'}\n"
-        f"BMR: {bmr} ккал\n"
-        f"TDEE: {tdee} ккал\n"
-        f"Дневная норма: {target} ккал\n"
-        f"{macros_text}"
-    )
+    try:
+        bmr, tdee = calculate_tdee(profile)
+        goal = get_goal(uid)
+        target = get_target_calories(profile, goal) if goal else tdee
+
+        macros_text = ""
+        if goal:
+            _, p_g, f_g, c_g = get_daily_macros(profile, goal)
+            macros_text = f"БЖУ в день: Б {p_g} г / Ж {f_g} г / У {c_g} г\n"
+
+        return (
+            f"Пол: {profile.get('sex', '—')}\n"
+            f"Возраст: {profile.get('age', '—')}\n"
+            f"Рост: {profile.get('height', '—')} см\n"
+            f"Вес: {profile.get('weight', '—')} кг\n"
+            f"Активность: {profile.get('activity', '—')}\n"
+            f"Цель: {goal if goal else 'Не установлена'}\n"
+            f"BMR: {bmr} ккал\n"
+            f"TDEE: {tdee} ккал\n"
+            f"Дневная норма: {target} ккал\n"
+            f"{macros_text}"
+        )
+    except Exception:
+        return (
+            f"Пол: {profile.get('sex', '—')}\n"
+            f"Возраст: {profile.get('age', '—')}\n"
+            f"Рост: {profile.get('height', '—')} см\n"
+            f"Вес: {profile.get('weight', '—')} кг\n"
+            f"Активность: {profile.get('activity', '—')}\n"
+            f"Цель: {get_goal(uid) if get_goal(uid) else 'Не установлена'}\n"
+            f"Профиль заполнен не полностью."
+        )
 
 def get_statistics(uid, period="day"):
     profile = get_profile(uid)
@@ -445,6 +469,14 @@ def analyze_image_with_logmeal(image_bytes: bytes):
             files=files,
             timeout=120,
         )
+
+        if rec_response.status_code == 429:
+            retry_after = rec_response.headers.get("RateLimit-Reset") or rec_response.headers.get("retry-after")
+            return None, None, None, (
+                "Сервис распознавания временно недоступен из-за лимита запросов.\n"
+                + (f"Попробуй снова через {retry_after} сек." if retry_after else "Попробуй позже.")
+            )
+
         if rec_response.status_code != 200:
             return None, None, None, f"Ошибка распознавания: {rec_response.status_code}"
 
@@ -480,6 +512,13 @@ def analyze_image_with_logmeal(image_bytes: bytes):
             json={"imageId": image_id},
             timeout=120,
         )
+
+        if nutri_response.status_code == 429:
+            retry_after = nutri_response.headers.get("RateLimit-Reset") or nutri_response.headers.get("retry-after")
+            return None, dish_name, None, (
+                "Сервис нутриентов временно недоступен из-за лимита запросов.\n"
+                + (f"Попробуй снова через {retry_after} сек." if retry_after else "Попробуй позже.")
+            )
 
         if nutri_response.status_code == 200:
             nutri_json = safe_json(nutri_response)
@@ -717,8 +756,16 @@ async def profile_activity(message: Message, state: FSMContext):
 @dp.message(StateFilter(ProfileForm.goal), F.text.in_(["Похудение", "Поддержание", "Набор"]))
 async def profile_goal(message: Message, state: FSMContext):
     data = await state.get_data()
+
+    required_keys = ["sex", "age", "height", "weight", "activity"]
+    if any(data.get(k) is None for k in required_keys):
+        await message.answer("Профиль заполнен не полностью. Начни создание профиля заново.")
+        await state.clear()
+        return
+
     set_profile(message.from_user.id, data)
     set_goal(message.from_user.id, message.text)
+
     await state.clear()
     await message.answer(
         f"Профиль сохранен.\n\n{profile_summary(data, message.from_user.id)}",
