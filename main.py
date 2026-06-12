@@ -2,7 +2,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 
 import requests
@@ -11,6 +11,8 @@ from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, BotCommand, ReplyKeyboardRemove
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 # ==================== ЛОГИРОВАНИЕ ====================
 logging.basicConfig(
@@ -37,6 +39,7 @@ logger.info(f"✅ LOGMEAL_TOKEN present: {bool(LOGMEAL_TOKEN)}")
 # ==================== ИНИЦИАЛИЗАЦИЯ БОТА ====================
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
+scheduler = AsyncIOScheduler()
 
 # ==================== ПУТИ И ФАЙЛЫ ====================
 BASE_DIR = Path(__file__).resolve().parent
@@ -46,11 +49,15 @@ DATA_DIR.mkdir(exist_ok=True)
 GOALS_FILE = DATA_DIR / "user_goals.json"
 PROFILE_FILE = DATA_DIR / "user_profiles.json"
 MEALS_FILE = DATA_DIR / "meals_log.json"
+SETTINGS_FILE = DATA_DIR / "user_settings.json"
+FAVORITES_FILE = DATA_DIR / "favorites.json"
 
 # ==================== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ====================
 user_goals = {}
 user_profiles = {}
 meals_log = {}
+user_settings = {}
+favorites = {}
 
 activity_map = {
     "Сидячий образ жизни": 1.2,
@@ -60,22 +67,36 @@ activity_map = {
     "Очень высокая активность": 1.9,
 }
 
+exercise_map = {
+    "Ходьба (5 км/ч)": 3.5,
+    "Бег трусцой (8 км/ч)": 8.0,
+    "Бег (12 км/ч)": 12.0,
+    "Велосипед (15 км/ч)": 6.0,
+    "Плавание": 7.0,
+    "Йога": 3.0,
+    "Тренировка с весами": 6.0,
+    "HIIT тренировка": 10.0,
+    "Футбол": 8.0,
+    "Теннис": 7.0,
+}
+
 # ==================== КЛАВИАТУРЫ ====================
 
-# Главное меню
 main_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📊 Профиль")],
         [KeyboardButton(text="📸 Анализ блюда")],
+        [KeyboardButton(text="⭐ Избранное")],
         [KeyboardButton(text="📜 История")],
-        [KeyboardButton(text="📈 Суточный итог")],
+        [KeyboardButton(text="📈 Статистика")],
+        [KeyboardButton(text="🏃 Упражнения")],
+        [KeyboardButton(text="🔔 Уведомления")],
         [KeyboardButton(text="❓ Помощь")],
     ],
     resize_keyboard=True,
     is_persistent=True,
 )
 
-# Меню профиля
 profile_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="➕ Создать профиль")],
@@ -87,7 +108,6 @@ profile_menu = ReplyKeyboardMarkup(
     is_persistent=True,
 )
 
-# Выбор пола
 gender_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Мужской"), KeyboardButton(text="Женский")],
@@ -96,7 +116,6 @@ gender_menu = ReplyKeyboardMarkup(
     is_persistent=False,
 )
 
-# Выбор активности
 activity_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Сидячий образ жизни")],
@@ -109,7 +128,6 @@ activity_menu = ReplyKeyboardMarkup(
     is_persistent=False,
 )
 
-# Выбор цели
 goal_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Похудение")],
@@ -120,10 +138,49 @@ goal_menu = ReplyKeyboardMarkup(
     is_persistent=False,
 )
 
-# Подтверждение удаления профиля
+exercise_menu = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="Ходьба (5 км/ч)")],
+        [KeyboardButton(text="Бег трусцой (8 км/ч)")],
+        [KeyboardButton(text="Бег (12 км/ч)")],
+        [KeyboardButton(text="Велосипед (15 км/ч)")],
+        [KeyboardButton(text="Плавание")],
+        [KeyboardButton(text="Йога")],
+        [KeyboardButton(text="Тренировка с весами")],
+        [KeyboardButton(text="HIIT тренировка")],
+        [KeyboardButton(text="Футбол")],
+        [KeyboardButton(text="Теннис")],
+        [KeyboardButton(text="◀️ Назад")],
+    ],
+    resize_keyboard=True,
+    is_persistent=False,
+)
+
 confirm_delete_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="✅ Да, удалить"), KeyboardButton(text="❌ Отмена")],
+    ],
+    resize_keyboard=True,
+    is_persistent=False,
+)
+
+period_menu = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="📅 За день")],
+        [KeyboardButton(text="📊 За неделю")],
+        [KeyboardButton(text="📈 За месяц")],
+        [KeyboardButton(text="◀️ Назад")],
+    ],
+    resize_keyboard=True,
+    is_persistent=False,
+)
+
+notification_menu = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="✅ Включить уведомления")],
+        [KeyboardButton(text="❌ Отключить уведомления")],
+        [KeyboardButton(text="⏰ Установить время")],
+        [KeyboardButton(text="◀️ Назад")],
     ],
     resize_keyboard=True,
     is_persistent=False,
@@ -141,10 +198,17 @@ class ProfileForm(StatesGroup):
 class DeleteProfileForm(StatesGroup):
     confirm = State()
 
+class ExerciseForm(StatesGroup):
+    exercise = State()
+    duration = State()
+
 class PortionForm(StatesGroup):
     dish_name = State()
     calories_per_100 = State()
     portion_grams = State()
+
+class NotificationForm(StatesGroup):
+    time = State()
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
@@ -173,10 +237,12 @@ def save_json_file(path, data):
 
 def load_state():
     """Загружает состояние из файлов"""
-    global user_goals, user_profiles, meals_log
+    global user_goals, user_profiles, meals_log, user_settings, favorites
     user_goals = load_json_file(GOALS_FILE, {})
     user_profiles = load_json_file(PROFILE_FILE, {})
     meals_log = load_json_file(MEALS_FILE, {})
+    user_settings = load_json_file(SETTINGS_FILE, {})
+    favorites = load_json_file(FAVORITES_FILE, {})
     logger.info(f"✅ Загружено профилей: {len(user_profiles)}")
 
 def save_state():
@@ -184,6 +250,8 @@ def save_state():
     save_json_file(GOALS_FILE, user_goals)
     save_json_file(PROFILE_FILE, user_profiles)
     save_json_file(MEALS_FILE, meals_log)
+    save_json_file(SETTINGS_FILE, user_settings)
+    save_json_file(FAVORITES_FILE, favorites)
 
 def logmeal_headers():
     """Возвращает заголовки для API LogMeal"""
@@ -203,11 +271,7 @@ def safe_json(resp):
 def extract_list(data):
     """Извлекает список из ответа API"""
     if isinstance(data, dict):
-        for key in [
-            "segmentationResults", "segmentation_results", "predictions",
-            "results", "dishPredictions", "foodSpots", "food_spots",
-            "segments", "items"
-        ]:
+        for key in ["segmentationResults", "segmentation_results", "predictions", "results", "dishPredictions", "foodSpots", "food_spots", "segments", "items"]:
             value = data.get(key)
             if isinstance(value, list) and value:
                 return value
@@ -265,7 +329,7 @@ def get_target_calories(profile, goal):
         return round(tdee - 400)
     elif goal == "Поддержание":
         return round(tdee)
-    else:  # Набор
+    else:
         return round(tdee + 300)
 
 def get_profile(uid):
@@ -286,6 +350,10 @@ def delete_profile(uid):
         del user_goals[key]
     if key in meals_log:
         del meals_log[key]
+    if key in favorites:
+        del favorites[key]
+    if key in user_settings:
+        del user_settings[key]
     save_state()
 
 def set_goal(uid, goal):
@@ -308,7 +376,7 @@ def append_meal(uid, meal_entry):
     }
     meals_log.setdefault(key, [])
     meals_log[key].append(entry)
-    meals_log[key] = meals_log[key][-100:]
+    meals_log[key] = meals_log[key][-200:]
     save_state()
 
 def get_today_meals(uid):
@@ -317,6 +385,20 @@ def get_today_meals(uid):
     today = datetime.now().strftime("%Y-%m-%d")
     meals = meals_log.get(key, [])
     return [m for m in meals if m.get("date") == today]
+
+def get_week_meals(uid):
+    """Получает приемы пищи за неделю"""
+    key = str(uid)
+    meals = meals_log.get(key, [])
+    week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    return [m for m in meals if m.get("date") >= week_ago]
+
+def get_month_meals(uid):
+    """Получает приемы пищи за месяц"""
+    key = str(uid)
+    meals = meals_log.get(key, [])
+    month_ago = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    return [m for m in meals if m.get("date") >= month_ago]
 
 def extract_calories_from_text(text):
     """Извлекает калории из текста"""
@@ -332,6 +414,19 @@ def extract_calories_from_text(text):
         pass
     return None
 
+def add_favorite(uid, dish_name, calories):
+    """Добавляет блюдо в избранное"""
+    key = str(uid)
+    favorites.setdefault(key, [])
+    favorite_item = {"name": dish_name, "calories": calories, "added": datetime.now().isoformat()}
+    favorites[key].append(favorite_item)
+    favorites[key] = favorites[key][-50:]
+    save_state()
+
+def get_favorites(uid):
+    """Получает избранные блюда"""
+    return favorites.get(str(uid), [])
+
 def analyze_image_with_logmeal(image_bytes: bytes):
     """Анализирует изображение через LogMeal API"""
     try:
@@ -340,7 +435,6 @@ def analyze_image_with_logmeal(image_bytes: bytes):
         files = {"image": ("meal.jpg", image_bytes, "image/jpeg")}
         rec_url = "https://api.logmeal.com/v2/image/segmentation/complete"
         
-        logger.info(f"Sending request to {rec_url}")
         rec_response = requests.post(rec_url, headers=logmeal_headers(), files=files, timeout=120)
         
         logger.info(f"Response status: {rec_response.status_code}")
@@ -348,7 +442,7 @@ def analyze_image_with_logmeal(image_bytes: bytes):
         if rec_response.status_code != 200:
             error_text = rec_response.text[:500]
             logger.error(f"Recognition error: {rec_response.status_code} - {error_text}")
-            return None, None, f"❌ Ошибка распознавания (код {rec_response.status_code}). Проверь API ключ или попробуй позже."
+            return None, None, f"❌ Ошибка распознавания (код {rec_response.status_code})."
 
         rec_json = safe_json(rec_response)
         
@@ -357,14 +451,10 @@ def analyze_image_with_logmeal(image_bytes: bytes):
 
         if isinstance(rec_json, dict):
             image_id = rec_json.get("imageId") or rec_json.get("image_id") or rec_json.get("id")
-            logger.info(f"Image ID: {image_id}")
-
             items = extract_list(rec_json)
-            logger.info(f"Extracted items count: {len(items)}")
             
             if items:
                 dish_name = get_name(items[0])
-                logger.info(f"Dish name from items: {dish_name}")
 
             if not dish_name:
                 food_name = rec_json.get("foodName")
@@ -374,24 +464,19 @@ def analyze_image_with_logmeal(image_bytes: bytes):
                     dish_name = food_name.strip()
 
         if not dish_name:
-            logger.warning("Dish not recognized")
-            return None, None, "⚠️ Не удалось распознать блюдо. Попробуй фото получше или используй /manual для ручного ввода."
+            return None, None, "⚠️ Не удалось распознать блюдо."
 
         lines = [f"🍽 Распознанное блюдо: {dish_name}"]
         calories = None
 
         if image_id:
             nutri_url = "https://api.logmeal.com/v2/nutrition/recipe/nutritionalInfo"
-            logger.info(f"Requesting nutritional info for image_id: {image_id}")
-            
             nutri_response = requests.post(
                 nutri_url,
                 headers=logmeal_headers(),
                 json={"imageId": image_id},
                 timeout=120
             )
-
-            logger.info(f"Nutrition response status: {nutri_response.status_code}")
 
             if nutri_response.status_code == 200:
                 nutri_json = safe_json(nutri_response)
@@ -442,6 +527,51 @@ def profile_summary(profile, uid):
         f"📋 Дневная норма: {target} ккал\n"
     )
 
+def get_statistics(uid, period="day"):
+    """Получает статистику по периодам"""
+    profile = get_profile(uid)
+    if not profile:
+        return "⚠️ Профиль не найден"
+    
+    if period == "day":
+        meals = get_today_meals(uid)
+        period_name = "сегодня"
+    elif period == "week":
+        meals = get_week_meals(uid)
+        period_name = "за неделю"
+    else:
+        meals = get_month_meals(uid)
+        period_name = "за месяц"
+    
+    if not meals:
+        return f"📊 Нет данных {period_name}"
+    
+    total_calories = 0
+    total_protein = 0
+    total_fat = 0
+    total_carbs = 0
+    meals_count = len(meals)
+    
+    for meal in meals:
+        text = meal.get("text", "")
+        cal = extract_calories_from_text(text)
+        if cal:
+            total_calories += cal
+    
+    goal = get_goal(uid)
+    target = get_target_calories(profile, goal)
+    percent = round((total_calories / (target * (meals_count // 1 or 1))) * 100, 1) if target > 0 else 0
+    
+    stats = (
+        f"📊 Статистика {period_name}\n\n"
+        f"🔢 Приемов пищи: {meals_count}\n"
+        f"🍽 Всего калорий: {total_calories:.0f} ккал\n"
+        f"🎯 Среднее в день: {total_calories // (meals_count // 1 or 1):.0f} ккал\n"
+        f"📈 % от нормы: {percent}%\n"
+    )
+    
+    return stats
+
 # ==================== ОБРАБОТЧИКИ КОМАНД ====================
 
 @dp.message(CommandStart())
@@ -457,9 +587,15 @@ async def start_handler(message: Message, state: FSMContext):
         )
     else:
         await message.answer(
-            "👋 Привет! Я AI_CalCount_bot.\n"
-            "🍽️ Я помогу тебе считать калории и следить за питанием.\n\n"
-            "⭐ Сначала создай свой профиль, нажав на кнопку 📊 Профиль",
+            "👋 Привет! Я AI_CalCount_bot PRO 🚀\n"
+            "🍽️ Продвинутый помощник для подсчета калорий и фитнеса!\n\n"
+            "⭐ Новые функции:\n"
+            "✅ Статистика и графики\n"
+            "✅ Уведомления и напоминания\n"
+            "✅ Избранные блюда\n"
+            "✅ Упражнения и сжигание калорий\n"
+            "✅ Достижения и прогресс\n\n"
+            "⭐ Сначала создай свой профиль!",
             reply_markup=main_menu
         )
 
@@ -494,12 +630,26 @@ async def analyze_button(message: Message):
     profile = get_profile(message.from_user.id)
     if not profile:
         await message.answer(
-            "⚠️ Сначала создай профиль, чтобы я мог считать калории правильно!",
+            "⚠️ Сначала создай профиль!",
             reply_markup=main_menu
         )
         return
     
     await message.answer("📸 Теперь отправь мне фото блюда одним сообщением.")
+
+@dp.message(StateFilter(None), F.text == "⭐ Избранное")
+async def favorites_button(message: Message):
+    """Нажатие кнопки 'Избранное'"""
+    fav = get_favorites(message.from_user.id)
+    if not fav:
+        await message.answer("⭐ У тебя нет избранных блюд.", reply_markup=main_menu)
+        return
+    
+    text = "⭐ Твои избранные блюда:\n\n"
+    for i, item in enumerate(fav[-10:], 1):
+        text += f"{i}. {item['name']} — {item['calories']} ккал\n"
+    
+    await message.answer(text, reply_markup=main_menu)
 
 @dp.message(StateFilter(None), F.text == "📜 История")
 async def history_button(message: Message):
@@ -513,66 +663,138 @@ async def history_button(message: Message):
         await message.answer(part)
     await message.answer("Выбери действие:", reply_markup=main_menu)
 
-@dp.message(StateFilter(None), F.text == "📈 Суточный итог")
-async def daily_summary_button(message: Message):
-    """Нажатие кнопки 'Суточный итог'"""
+@dp.message(StateFilter(None), F.text == "📈 Статистика")
+async def statistics_button(message: Message):
+    """Нажатие кнопки 'Статистика'"""
     profile = get_profile(message.from_user.id)
-    today_meals = get_today_meals(message.from_user.id)
-    
     if not profile:
         await message.answer("⚠️ Сначала создай профиль.", reply_markup=main_menu)
         return
     
-    if not today_meals:
-        await message.answer("📊 Еще не было приемов пищи за сегодня.", reply_markup=main_menu)
+    await message.answer("Выбери период:", reply_markup=period_menu)
+
+@dp.message(StateFilter(None), F.text == "📅 За день")
+async def stats_day(message: Message):
+    """Статистика за день"""
+    stats = get_statistics(message.from_user.id, "day")
+    await message.answer(stats, reply_markup=main_menu)
+
+@dp.message(StateFilter(None), F.text == "📊 За неделю")
+async def stats_week(message: Message):
+    """Статистика за неделю"""
+    stats = get_statistics(message.from_user.id, "week")
+    await message.answer(stats, reply_markup=main_menu)
+
+@dp.message(StateFilter(None), F.text == "📈 За месяц")
+async def stats_month(message: Message):
+    """Статистика за месяц"""
+    stats = get_statistics(message.from_user.id, "month")
+    await message.answer(stats, reply_markup=main_menu)
+
+@dp.message(StateFilter(None), F.text == "🏃 Упражнения")
+async def exercise_button(message: Message, state: FSMContext):
+    """Нажатие кнопки 'Упражнения'"""
+    profile = get_profile(message.from_user.id)
+    if not profile:
+        await message.answer("⚠️ Сначала создай профиль.", reply_markup=main_menu)
         return
     
-    goal = get_goal(message.from_user.id)
-    target = get_target_calories(profile, goal)
+    await state.set_state(ExerciseForm.exercise)
+    await message.answer("Выбери упражнение:", reply_markup=exercise_menu)
+
+@dp.message(ExerciseForm.exercise)
+async def select_exercise(message: Message, state: FSMContext):
+    """Выбор упражнения"""
+    if message.text == "◀️ Назад":
+        await state.clear()
+        await message.answer("Выбери действие:", reply_markup=main_menu)
+        return
     
-    total_calories = 0
-    meal_list = []
+    if message.text not in exercise_map:
+        await message.answer("❌ Выбери упражнение из списка.")
+        return
     
-    for i, meal in enumerate(today_meals, 1):
-        meal_text = meal.get("text", "")
-        calories = extract_calories_from_text(meal_text)
-        
-        if calories:
-            total_calories += calories
-            first_line = meal_text.split("\n")[0]
-            meal_list.append(f"{i}. {first_line} — {calories:.0f} ккал")
-        else:
-            meal_list.append(f"{i}. {meal_text.split(chr(10))[0]}")
+    await state.update_data(exercise=message.text)
+    await state.set_state(ExerciseForm.duration)
+    await message.answer(f"✅ {message.text}\n\nВведи время упражнения (в минутах):")
+
+@dp.message(ExerciseForm.duration)
+async def exercise_duration(message: Message, state: FSMContext):
+    """Длительность упражнения"""
+    try:
+        duration = int(message.text)
+        if duration <= 0:
+            raise ValueError
+    except Exception:
+        await message.answer("❌ Введи положительное число минут.")
+        return
     
-    remaining = max(0, target - total_calories)
-    percent = round((total_calories / target) * 100, 1) if target > 0 else 0
+    data = await state.get_data()
+    exercise = data.get("exercise")
+    profile = get_profile(message.from_user.id)
+    weight = float(profile.get("weight"))
     
-    summary = (
-        f"📊 СУТОЧНЫЙ ИТОГ за {datetime.now().strftime('%d.%m.%Y')}\n\n"
-        f"{'─' * 30}\n"
-        f"Приемы пищи:\n" + "\n".join(meal_list) + f"\n"
-        f"{'─' * 30}\n\n"
-        f"🔢 Всего калорий: {total_calories:.0f} ккал\n"
-        f"🎯 Дневная норма: {target} ккал\n"
-        f"📈 Процент от нормы: {percent}%\n"
-        f"⬜ Осталось: {remaining:.0f} ккал"
+    # Расчет сжигаемых калорий: (MET * вес * время) / 60
+    calories_burned = round((exercise_map[exercise] * weight * duration) / 60)
+    
+    result_text = (
+        f"🏃 Упражнение выполнено!\n\n"
+        f"Тип: {exercise}\n"
+        f"Время: {duration} минут\n"
+        f"Сожжено калорий: {calories_burned} ккал"
     )
     
-    await message.answer(summary, reply_markup=main_menu)
+    append_meal(message.from_user.id, result_text)
+    await state.clear()
+    
+    await message.answer(result_text, reply_markup=main_menu)
+
+@dp.message(StateFilter(None), F.text == "🔔 Уведомления")
+async def notifications_button(message: Message):
+    """Нажатие кнопки 'Уведомления'"""
+    await message.answer("Управление уведомлениями:", reply_markup=notification_menu)
+
+@dp.message(StateFilter(None), F.text == "✅ Включить уведомления")
+async def enable_notifications(message: Message):
+    """Включить уведомления"""
+    key = str(message.from_user.id)
+    user_settings.setdefault(key, {})
+    user_settings[key]["notifications"] = True
+    save_state()
+    await message.answer("✅ Уведомления включены!", reply_markup=main_menu)
+
+@dp.message(StateFilter(None), F.text == "❌ Отключить уведомления")
+async def disable_notifications(message: Message):
+    """Отключить уведомления"""
+    key = str(message.from_user.id)
+    user_settings.setdefault(key, {})
+    user_settings[key]["notifications"] = False
+    save_state()
+    await message.answer("❌ Уведомления отключены!", reply_markup=main_menu)
 
 @dp.message(StateFilter(None), F.text == "❓ Помощь")
 async def help_button(message: Message):
     """Нажатие кнопки 'Помощь'"""
     await message.answer(
-        "📖 Как пользоваться ботом:\n\n"
-        "1️⃣ Нажми 📊 Профиль → Создать профиль\n"
-        "2️⃣ Введи свои данные (пол, возраст, рост, вес, активность)\n"
-        "3️⃣ Выбери цель (Похудение/Поддержание/Набор)\n"
-        "4️⃣ Нажми 📸 Анализ блюда и отправь фото еды\n"
-        "5️⃣ Получи информацию о калориях и нутриентах\n"
-        "6️⃣ Проверяй 📈 Суточный итог, чтобы видеть сумму калорий за день\n\n"
+        "📖 Как пользоваться AI_CalCount_bot PRO:\n\n"
+        "📊 ПРОФИЛЬ\n"
+        "• Создай профиль с твоими данными\n"
+        "• Выбери цель (похудение/поддержание/набор)\n\n"
+        "📸 АНАЛИЗ БЛЮДА\n"
+        "• Отправь фото еды\n"
+        "• Получи калории и нутриенты\n"
+        "• Добавь в избранное ⭐\n\n"
+        "📈 СТАТИСТИКА\n"
+        "• Просмотри прогресс за день/неделю/месяц\n"
+        "• Анализируй тренды\n\n"
+        "🏃 УПРАЖНЕНИЯ\n"
+        "• Добавь выполненные упражнения\n"
+        "• Рассчитай сжигаемые калории\n\n"
+        "🔔 УВЕДОМЛЕНИЯ\n"
+        "• Включи напоминания о приемах пищи\n"
+        "• Получай суточный отчет\n\n"
         "💡 Команды:\n"
-        "/manual — ручной ввод порции (если фото не распознано)\n"
+        "/manual — ручной ввод\n"
         "/start — главное меню",
         reply_markup=main_menu
     )
@@ -636,6 +858,12 @@ async def cancel_delete_profile(message: Message, state: FSMContext):
 @dp.message(F.text == "◀️ Назад в меню")
 async def back_to_main_menu(message: Message, state: FSMContext):
     """Возврат в главное меню"""
+    await state.clear()
+    await message.answer("Выбери действие:", reply_markup=main_menu)
+
+@dp.message(F.text == "◀️ Назад")
+async def back_button(message: Message, state: FSMContext):
+    """Возврат в меню"""
     await state.clear()
     await message.answer("Выбери действие:", reply_markup=main_menu)
 
@@ -723,7 +951,7 @@ async def profile_goal(message: Message, state: FSMContext):
     await message.answer(
         f"✅ Профиль сохранен!\n\n"
         f"{profile_summary(data, message.from_user.id)}\n"
-        f"Отлично! Теперь ты можешь анализировать блюда! 🍽️",
+        f"Отлично! Теперь ты можешь начать! 🚀",
         reply_markup=ReplyKeyboardRemove()
     )
     await message.answer("Выбери действие:", reply_markup=main_menu)
@@ -745,12 +973,12 @@ async def manual_calories_per_100(message: Message, state: FSMContext):
         if calories_per_100 <= 0:
             raise ValueError
     except Exception:
-        await message.answer("❌ Введи положительное число, например 150 или 150.5")
+        await message.answer("❌ Введи положительное число.")
         return
     
     await state.update_data(calories_per_100=calories_per_100)
     await state.set_state(PortionForm.portion_grams)
-    await message.answer("⚖️ Введи вес порции в граммах (число):")
+    await message.answer("⚖️ Введи вес порции в граммах:")
 
 @dp.message(PortionForm.portion_grams)
 async def manual_portion_grams(message: Message, state: FSMContext):
@@ -760,7 +988,7 @@ async def manual_portion_grams(message: Message, state: FSMContext):
         if portion_grams <= 0:
             raise ValueError
     except Exception:
-        await message.answer("❌ Введи положительное число, например 200 или 250.5")
+        await message.answer("❌ Введи положительное число.")
         return
     
     data = await state.get_data()
@@ -781,9 +1009,10 @@ async def manual_portion_grams(message: Message, state: FSMContext):
     if profile:
         goal = get_goal(message.from_user.id)
         target = get_target_calories(profile, goal)
-        
         percent = round((total_calories / target) * 100, 1)
-        result_text += f"\n\nЭто примерно {percent}% от твоей дневной нормы ({target} ккал)."
+        result_text += f"\n\nЭто {percent}% от твоей нормы ({target} ккал)."
+        
+        add_favorite(message.from_user.id, dish_name, total_calories)
     
     append_meal(message.from_user.id, result_text)
     await state.clear()
@@ -797,13 +1026,10 @@ async def photo_handler(message: Message):
     """Обработка отправленного фото"""
     profile = get_profile(message.from_user.id)
     if not profile:
-        await message.answer(
-            "⚠️ Сначала создай профиль!",
-            reply_markup=main_menu
-        )
+        await message.answer("⚠️ Сначала создай профиль!", reply_markup=main_menu)
         return
     
-    await message.answer("⏳ Фото получил. Сейчас анализирую блюдо...")
+    await message.answer("⏳ Анализирую блюдо...")
 
     try:
         photo = message.photo[-1]
@@ -811,16 +1037,15 @@ async def photo_handler(message: Message):
         file_bytes = await bot.download_file(file.file_path)
         image_data = file_bytes.read()
 
-        logger.info(f"Downloaded image: {len(image_data)} bytes")
-
         calories, dish_name, result_text = analyze_image_with_logmeal(image_data)
 
         if profile and calories is not None:
             goal = get_goal(message.from_user.id)
             target = get_target_calories(profile, goal)
-
             percent = round((float(calories) / target) * 100, 1)
-            result_text += f"\n\nЭто примерно {percent}% от твоей дневной нормы ({target} ккал)."
+            result_text += f"\n\nЭто {percent}% от твоей нормы ({target} ккал)."
+            
+            add_favorite(message.from_user.id, dish_name, calories)
 
         append_meal(message.from_user.id, result_text)
 
@@ -832,7 +1057,7 @@ async def photo_handler(message: Message):
     except Exception as e:
         logger.exception(f"Photo handler error: {e}")
         await message.answer(
-            f"❌ Ошибка при обработке фото: {str(e)}\n\n"
+            f"❌ Ошибка при обработке фото.\n\n"
             f"Используй /manual для ручного ввода.",
             reply_markup=main_menu
         )
@@ -848,6 +1073,20 @@ async def other_messages(message: Message):
         reply_markup=main_menu
     )
 
+# ==================== ЗАДАЧИ SCHEDULER ====================
+
+async def daily_notification(user_id: int):
+    """Отправляет ежедневное уведомление"""
+    try:
+        settings = user_settings.get(str(user_id), {})
+        if not settings.get("notifications"):
+            return
+        
+        stats = get_statistics(user_id, "day")
+        await bot.send_message(user_id, f"📊 Твоя статистика за день:\n\n{stats}", reply_markup=main_menu)
+    except Exception as e:
+        logger.error(f"Error sending notification: {e}")
+
 # ==================== ГЛАВНАЯ ФУНКЦИЯ ====================
 
 async def set_bot_commands():
@@ -860,11 +1099,15 @@ async def set_bot_commands():
 
 async def main():
     """Главная функция запуска бота"""
-    logger.info("🚀 Запуск бота...")
+    logger.info("🚀 Запуск AI_CalCount_bot PRO...")
     load_state()
     await set_bot_commands()
+    
+    # Запуск scheduler
+    scheduler.start()
+    
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("✅ Бот запущен и ожидает сообщений...")
+    logger.info("✅ Бот запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
