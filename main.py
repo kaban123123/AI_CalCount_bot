@@ -1,5 +1,8 @@
 import asyncio
+import json
 import os
+from pathlib import Path
+
 import requests
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
@@ -11,7 +14,13 @@ LOGMEAL_TOKEN = os.environ.get("LOGMEAL_TOKEN", "").strip()
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-user_goals = {}
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+DATA_DIR.mkdir(exist_ok=True)
+
+GOALS_FILE = DATA_DIR / "user_goals.json"
+PROFILE_FILE = DATA_DIR / "user_profiles.json"
+MEALS_FILE = DATA_DIR / "meals_log.json"
 
 GOAL_CALORIES = {
     "Похудение": 1600,
@@ -19,16 +28,45 @@ GOAL_CALORIES = {
     "Набор": 2800,
 }
 
+user_goals = {}
+user_profiles = {}
+meals_log = {}
+
 menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Похудение"), KeyboardButton(text="Поддержание"), KeyboardButton(text="Набор")],
-        [KeyboardButton(text="Анализ блюда"), KeyboardButton(text="Помощь")],
+        [KeyboardButton(text="Анализ блюда"), KeyboardButton(text="История"), KeyboardButton(text="Помощь")],
     ],
-    resize_keyboard=True
+    resize_keyboard=True,
+    is_persistent=True,
 )
 
 def split_text(text, limit=4000):
     return [text[i:i + limit] for i in range(0, len(text), limit)]
+
+def load_json_file(path, default):
+    if path.exists():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return default
+    return default
+
+def save_json_file(path, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def load_state():
+    global user_goals, user_profiles, meals_log
+    user_goals = load_json_file(GOALS_FILE, {})
+    user_profiles = load_json_file(PROFILE_FILE, {})
+    meals_log = load_json_file(MEALS_FILE, {})
+
+def save_state():
+    save_json_file(GOALS_FILE, user_goals)
+    save_json_file(PROFILE_FILE, user_profiles)
+    save_json_file(MEALS_FILE, meals_log)
 
 def logmeal_headers():
     return {
@@ -80,14 +118,14 @@ def extract_nutrients(nutri_json):
 
     return calories, protein, fat, carbs, fiber, sugar, score
 
-def analyze_image_with_logmeal(image_bytes: bytes) -> str:
+def analyze_image_with_logmeal(image_bytes: bytes):
     try:
         files = {"image": ("meal.jpg", image_bytes, "image/jpeg")}
         rec_url = "https://api.logmeal.com/v2/image/segmentation/complete"
         rec_response = requests.post(rec_url, headers=logmeal_headers(), files=files, timeout=120)
 
         if rec_response.status_code != 200:
-            return f"Ошибка распознавания: {rec_response.status_code}\n{rec_response.text}"
+            return None, f"Ошибка распознавания: {rec_response.status_code}\n{rec_response.text}"
 
         rec_json = safe_json(rec_response)
         image_id = None
@@ -107,6 +145,7 @@ def analyze_image_with_logmeal(image_bytes: bytes) -> str:
                 dish_name = food_name.strip()
 
         lines = [f"Распознанное блюдо: {dish_name}"]
+        calories = None
 
         if image_id:
             nutri_url = "https://api.logmeal.com/v2/nutrition/recipe/nutritionalInfo"
@@ -149,10 +188,31 @@ def analyze_image_with_logmeal(image_bytes: bytes) -> str:
 
         lines.append("")
         lines.append("Выбери цель кнопкой снизу, и я буду сравнивать блюда с твоей нормой.")
-        return "\n".join(lines)
+        return calories, "\n".join(lines)
 
     except Exception as e:
-        return f"Ошибка анализа: {e}"
+        return None, f"Ошибка анализа: {e}"
+
+def get_goal(uid):
+    return user_goals.get(str(uid))
+
+def set_goal(uid, goal):
+    user_goals[str(uid)] = goal
+    save_state()
+
+def append_meal(uid, meal_text):
+    key = str(uid)
+    meals_log.setdefault(key, [])
+    meals_log[key].append(meal_text)
+    meals_log[key] = meals_log[key][-20:]
+    save_state()
+
+def get_profile(uid):
+    return user_profiles.get(str(uid), {})
+
+def set_profile(uid, profile):
+    user_profiles[str(uid)] = profile
+    save_state()
 
 @dp.message(CommandStart())
 async def start_handler(message: Message):
@@ -164,24 +224,39 @@ async def start_handler(message: Message):
 
 @dp.message(F.text.in_(["Похудение", "Поддержание", "Набор"]))
 async def goal_handler(message: Message):
-    user_goals[message.from_user.id] = message.text
+    set_goal(message.from_user.id, message.text)
     daily = GOAL_CALORIES[message.text]
     await message.answer(
         f"Цель установлена: {message.text}\n"
         f"Дневная норма: {daily} ккал.\n"
-        f"Теперь отправь фото блюда."
+        f"Теперь отправь фото блюда.",
+        reply_markup=menu
     )
 
 @dp.message(F.text == "Помощь")
 async def help_handler(message: Message):
     await message.answer(
-        "Сначала выбери цель, потом отправь фото еды.\n"
-        "Я покажу калории и сравню с твоей дневной нормой."
+        "Команды и кнопки:\n"
+        "• Похудение / Поддержание / Набор — цель.\n"
+        "• Анализ блюда — подсказка.\n"
+        "• История — последние анализы.\n\n"
+        "После выбора цели отправь фото еды.",
+        reply_markup=menu
     )
+
+@dp.message(F.text == "История")
+async def history_handler(message: Message):
+    items = meals_log.get(str(message.from_user.id), [])
+    if not items:
+        await message.answer("История пока пустая.", reply_markup=menu)
+        return
+    text = "Последние анализы:\n\n" + "\n\n".join(items[-5:])
+    for part in split_text(text):
+        await message.answer(part, reply_markup=menu)
 
 @dp.message(F.text == "Анализ блюда")
 async def analyze_hint(message: Message):
-    await message.answer("Теперь отправь мне фото блюда одним сообщением.")
+    await message.answer("Теперь отправь мне фото блюда одним сообщением.", reply_markup=menu)
 
 @dp.message(F.photo)
 async def photo_handler(message: Message):
@@ -192,33 +267,29 @@ async def photo_handler(message: Message):
     file_bytes = await bot.download_file(file.file_path)
     image_data = file_bytes.read()
 
-    result_text = analyze_image_with_logmeal(image_data)
+    calories, result_text = analyze_image_with_logmeal(image_data)
 
-    goal = user_goals.get(message.from_user.id)
-    if goal:
+    goal = get_goal(message.from_user.id)
+    if goal and calories is not None:
         daily = GOAL_CALORIES.get(goal)
-        calories = None
-
-        for line in result_text.splitlines():
-            if line.startswith("Калории:"):
-                try:
-                    calories = float(line.split(":", 1)[1].strip().split()[0])
-                except Exception:
-                    pass
-                break
-
-        if calories is not None and daily:
-            percent = round((calories / daily) * 100, 1)
+        if daily:
+            percent = round((float(calories) / daily) * 100, 1)
             result_text += f"\n\nЭто примерно {percent}% от дневной нормы для цели «{goal}» ({daily} ккал)."
 
+    append_meal(message.from_user.id, result_text)
+
     for part in split_text(result_text):
-        await message.answer(part)
+        await message.answer(part, reply_markup=menu)
 
 @dp.message()
 async def other_messages(message: Message):
-    await message.answer("Сначала выбери цель: Похудение, Поддержание или Набор.", reply_markup=menu)
+    await message.answer(
+        "Выбери цель или отправь фото блюда.",
+        reply_markup=menu
+    )
 
 async def main():
+    load_state()
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
