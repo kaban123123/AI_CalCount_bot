@@ -7,10 +7,10 @@ import logging
 
 import requests
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, BotCommand
 
 # ==================== ЛОГИРОВАНИЕ ====================
 logging.basicConfig(
@@ -61,18 +61,34 @@ activity_map = {
 }
 
 # ==================== КЛАВИАТУРЫ ====================
-menu = ReplyKeyboardMarkup(
+
+# Главное меню
+main_menu = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="Профиль"), KeyboardButton(text="Похудение"), 
-         KeyboardButton(text="Поддержание"), KeyboardButton(text="Набор")],
-        [KeyboardButton(text="Анализ блюда"), KeyboardButton(text="История"), 
-         KeyboardButton(text="Суточный итог"), KeyboardButton(text="Помощь")],
+        [KeyboardButton(text="📊 Профиль")],
+        [KeyboardButton(text="📸 Анализ блюда")],
+        [KeyboardButton(text="📜 История")],
+        [KeyboardButton(text="📈 Суточный итог")],
+        [KeyboardButton(text="❓ Помощь")],
     ],
     resize_keyboard=True,
     is_persistent=True,
 )
 
+# Меню профиля
 profile_menu = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="➕ Создать профиль")],
+        [KeyboardButton(text="✏️ Редактировать профиль")],
+        [KeyboardButton(text="🗑️ Удалить профиль")],
+        [KeyboardButton(text="◀️ Назад в меню")],
+    ],
+    resize_keyboard=True,
+    is_persistent=True,
+)
+
+# Выбор пола
+gender_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Мужской"), KeyboardButton(text="Женский")],
     ],
@@ -80,13 +96,25 @@ profile_menu = ReplyKeyboardMarkup(
     is_persistent=True,
 )
 
+# Выбор активности
 activity_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Сидячий образ жизни")],
         [KeyboardButton(text="Легкая активность")],
         [KeyboardButton(text="Средняя активность")],
-        [KeyboardButton(text="Высокая активность")],
+        [KeyboardButton(text="Высокая ��ктивность")],
         [KeyboardButton(text="Очень высокая активность")],
+    ],
+    resize_keyboard=True,
+    is_persistent=True,
+)
+
+# Выбор цели
+goal_menu = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="Похудение")],
+        [KeyboardButton(text="Поддержание")],
+        [KeyboardButton(text="Набор")],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -99,6 +127,7 @@ class ProfileForm(StatesGroup):
     height = State()
     weight = State()
     activity = State()
+    goal = State()
 
 class PortionForm(StatesGroup):
     dish_name = State()
@@ -217,6 +246,16 @@ def calculate_tdee(profile):
     tdee = bmr * factor
     return round(bmr), round(tdee)
 
+def get_target_calories(profile, goal):
+    """Получает целевые калории на основе профиля и цели"""
+    _, tdee = calculate_tdee(profile)
+    if goal == "Похудение":
+        return round(tdee - 400)
+    elif goal == "Поддержание":
+        return round(tdee)
+    else:  # Набор
+        return round(tdee + 300)
+
 def get_profile(uid):
     """Получает профиль пользователя"""
     return user_profiles.get(str(uid), {})
@@ -300,7 +339,6 @@ def analyze_image_with_logmeal(image_bytes: bytes):
             return None, None, f"❌ Ошибка распознавания (код {rec_response.status_code}). Проверь API ключ или попробуй позже."
 
         rec_json = safe_json(rec_response)
-        logger.info(f"Recognition response type: {type(rec_json)}")
         
         image_id = None
         dish_name = None
@@ -374,222 +412,111 @@ def analyze_image_with_logmeal(image_bytes: bytes):
         logger.exception(f"Analysis error: {e}")
         return None, None, f"❌ Ошибка анализа: {str(e)}"
 
-def profile_summary(profile):
+def profile_summary(profile, uid):
     """Форматирует информацию профиля"""
     bmr, tdee = calculate_tdee(profile)
+    goal = get_goal(uid)
+    target = get_target_calories(profile, goal) if goal else tdee
+    
     return (
         f"👤 Пол: {profile['sex']}\n"
         f"🎂 Возраст: {profile['age']}\n"
         f"📏 Рост: {profile['height']} см\n"
         f"⚖️ Вес: {profile['weight']} кг\n"
         f"🏃 Активность: {profile['activity']}\n"
+        f"🎯 Цель: {goal if goal else 'Не установлена'}\n"
         f"🔥 BMR: {bmr} ккал\n"
         f"⚡ TDEE: {tdee} ккал\n"
+        f"📋 Дневная норма: {target} ккал\n"
     )
 
 # ==================== ОБРАБОТЧИКИ КОМАНД ====================
 
 @dp.message(CommandStart())
-async def start_handler(message: Message):
+async def start_handler(message: Message, state: FSMContext):
     """Обработчик команды /start"""
+    await state.clear()
     profile = get_profile(message.from_user.id)
     if profile:
         await message.answer(
-            "👋 Привет! Профиль уже сохранён.\n\n" + profile_summary(profile) +
-            "\n✅ Выбери цель или отправь фото блюда.\n\n"
-            "📋 Команды: /profile, /reset_profile, /manual",
-            reply_markup=menu
+            f"👋 Привет, {message.from_user.first_name}!\n\n"
+            f"Твой профиль:\n\n{profile_summary(profile, message.from_user.id)}",
+            reply_markup=main_menu
         )
     else:
         await message.answer(
             "👋 Привет! Я AI_CalCount_bot.\n"
             "🍽️ Я помогу тебе считать калории и следить за питанием.\n\n"
-            "⭐ Сначала нажми «Профиль» и задай параметры тела.",
-            reply_markup=menu
+            "⭐ Сначала создай свой профиль, нажав на кнопку 📊 Профиль",
+            reply_markup=main_menu
         )
-
-@dp.message(Command("profile"))
-async def profile_command(message: Message, state: FSMContext):
-    """Команда /profile для заполнения профиля"""
-    await state.set_state(ProfileForm.sex)
-    await message.answer("Выбери пол:", reply_markup=profile_menu)
-
-@dp.message(Command("reset_profile"))
-async def reset_profile_handler(message: Message):
-    """Команда /reset_profile для удаления профиля"""
-    delete_profile(message.from_user.id)
-    await message.answer(
-        "🗑️ Профиль и все данные удалены.\n\n"
-        "Нажми «Профиль» для создания нового профиля.",
-        reply_markup=menu
-    )
 
 @dp.message(Command("manual"))
 async def manual_input_command(message: Message, state: FSMContext):
     """Команда /manual для ручного ввода порции"""
+    await state.clear()
     await state.set_state(PortionForm.dish_name)
     await message.answer("📝 Введи название блюда:")
 
-@dp.message(Command("help"))
-async def help_command(message: Message):
-    """Команда /help"""
-    await message.answer(
-        "📖 Схема работы:\n"
-        "1) Нажми «Профиль» и введи данные тела.\n"
-        "2) Выбери цель (Похудение/Поддержание/Набор).\n"
-        "3) Отправь фото блюда.\n"
-        "4) Получишь калории и сравнение с нормой.\n\n"
-        "📋 Команды:\n"
-        "/profile — заполнить профиль заново\n"
-        "/reset_profile — удалить профиль\n"
-        "/manual — ручной ввод порции\n"
-        "/help — эта справка\n\n"
-        "📊 Кнопки меню:\n"
-        "История — последние 5 приемов\n"
-        "Суточный итог — сумма калорий за день",
-        reply_markup=menu
-    )
+# ==================== ОБРАБОТЧИКИ ГЛАВНОГО МЕНЮ ====================
 
-# ==================== ОБРАБОТЧИКИ ПРОФИЛЯ ====================
-
-@dp.message(F.text == "Профиль")
-async def profile_start(message: Message, state: FSMContext):
+@dp.message(StateFilter(None), F.text == "📊 Профиль")
+async def profile_button(message: Message, state: FSMContext):
     """Нажатие кнопки 'Профиль'"""
-    await state.set_state(ProfileForm.sex)
-    await message.answer("Выбери пол:", reply_markup=profile_menu)
-
-@dp.message(ProfileForm.sex)
-async def profile_sex(message: Message, state: FSMContext):
-    """Ввод пола"""
-    if message.text not in ["Мужской", "Женский"]:
-        await message.answer("Выбери пол кнопкой.")
-        return
-    await state.update_data(sex=message.text)
-    await state.set_state(ProfileForm.age)
-    await message.answer("Введи возраст числом:")
-
-@dp.message(ProfileForm.age)
-async def profile_age(message: Message, state: FSMContext):
-    """Ввод возраста"""
-    try:
-        age = int(message.text)
-        if age < 10 or age > 100:
-            raise ValueError
-    except Exception:
-        await message.answer("❌ Введи возраст числом от 10 до 100.")
-        return
-    await state.update_data(age=age)
-    await state.set_state(ProfileForm.height)
-    await message.answer("Введи рост в сантиметрах (например, 175):")
-
-@dp.message(ProfileForm.height)
-async def profile_height(message: Message, state: FSMContext):
-    """Ввод роста"""
-    try:
-        height = float(message.text.replace(",", "."))
-        if height < 100 or height > 250:
-            raise ValueError
-    except Exception:
-        await message.answer("❌ Введи рост числом, например 175.")
-        return
-    await state.update_data(height=height)
-    await state.set_state(ProfileForm.weight)
-    await message.answer("Введи вес в килограммах (например, 72.5):")
-
-@dp.message(ProfileForm.weight)
-async def profile_weight(message: Message, state: FSMContext):
-    """Ввод веса"""
-    try:
-        weight = float(message.text.replace(",", "."))
-        if weight < 30 or weight > 300:
-            raise ValueError
-    except Exception:
-        await message.answer("❌ Введи вес числом, например 72.5.")
-        return
-    await state.update_data(weight=weight)
-    await state.set_state(ProfileForm.activity)
-    await message.answer("Выбери уровень активности:", reply_markup=activity_menu)
-
-@dp.message(ProfileForm.activity)
-async def profile_activity(message: Message, state: FSMContext):
-    """Ввод активности"""
-    if message.text not in activity_map:
-        await message.answer("Выбери активность кнопкой.")
-        return
-    await state.update_data(activity=message.text)
-    data = await state.get_data()
-    set_profile(message.from_user.id, data)
-    await state.clear()
-    await message.answer(
-        "✅ Профиль сохранён.\n\n" + profile_summary(data) +
-        "\n🎯 Теперь можно выбрать цель и отправлять фото еды.",
-        reply_markup=menu
-    )
-
-# ==================== ОБРАБОТЧИКИ ЦЕЛЕЙ ====================
-
-@dp.message(F.text.in_(["Похудение", "Поддержание", "Набор"]))
-async def goal_handler(message: Message):
-    """Установка цели"""
-    set_goal(message.from_user.id, message.text)
     profile = get_profile(message.from_user.id)
+    
     if profile:
-        _, tdee = calculate_tdee(profile)
-        if message.text == "Похудение":
-            target = round(tdee - 400)
-        elif message.text == "Поддержание":
-            target = round(tdee)
-        else:
-            target = round(tdee + 300)
         await message.answer(
-            f"🎯 Цель установлена: {message.text}\n"
-            f"📋 Твоя дневная норма: {target} ккал.\n"
-            f"📸 Теперь отправь фото блюда.",
-            reply_markup=menu
+            f"Твой текущий профиль:\n\n{profile_summary(profile, message.from_user.id)}",
+            reply_markup=profile_menu
         )
     else:
         await message.answer(
-            f"🎯 Цель установлена: {message.text}\n"
-            f"⚠️ Сначала заполни профиль, чтобы я мог посчитать норму по телу.",
-            reply_markup=menu
+            "У тебя нет профиля. Создай новый!",
+            reply_markup=profile_menu
         )
 
-# ==================== ОБРАБОТЧИКИ ИНФОРМАЦИИ ====================
+@dp.message(StateFilter(None), F.text == "📸 Анализ блюда")
+async def analyze_button(message: Message):
+    """Нажатие кнопки 'Анализ блюда'"""
+    profile = get_profile(message.from_user.id)
+    if not profile:
+        await message.answer(
+            "⚠️ Сначала создай профиль, чтобы я мог считать калории правильно!",
+            reply_markup=main_menu
+        )
+        return
+    
+    await message.answer("📸 Теперь отправь мне фото блюда одним сообщением.")
 
-@dp.message(F.text == "История")
-async def history_handler(message: Message):
-    """Показывает историю приемов пищи"""
+@dp.message(StateFilter(None), F.text == "📜 История")
+async def history_button(message: Message):
+    """Нажатие кнопки 'История'"""
     items = meals_log.get(str(message.from_user.id), [])
     if not items:
-        await message.answer("📜 История пока пустая.", reply_markup=menu)
+        await message.answer("📜 История пока пустая.", reply_markup=main_menu)
         return
     text = "📜 Последние анализы:\n\n" + "\n\n".join([item.get("text", "") for item in items[-5:]])
     for part in split_text(text):
-        await message.answer(part, reply_markup=menu)
+        await message.answer(part)
+    await message.answer("Выбери действие:", reply_markup=main_menu)
 
-@dp.message(F.text == "Суточный итог")
-async def daily_summary_handler(message: Message):
-    """Показывает суточный итог"""
+@dp.message(StateFilter(None), F.text == "📈 Суточный итог")
+async def daily_summary_button(message: Message):
+    """Нажатие кнопки 'Суточный итог'"""
     profile = get_profile(message.from_user.id)
     today_meals = get_today_meals(message.from_user.id)
     
     if not profile:
-        await message.answer("⚠️ Сначала заполни профиль.", reply_markup=menu)
+        await message.answer("⚠️ Сначала создай профиль.", reply_markup=main_menu)
         return
     
     if not today_meals:
-        await message.answer("📊 Еще не было приемов пищи за сегодня.", reply_markup=menu)
+        await message.answer("📊 Еще не было приемов пищи за сегодня.", reply_markup=main_menu)
         return
     
-    _, tdee = calculate_tdee(profile)
     goal = get_goal(message.from_user.id)
-    
-    if goal == "Похудение":
-        target = round(tdee - 400)
-    elif goal == "Набор":
-        target = round(tdee + 300)
-    else:
-        target = round(tdee)
+    target = get_target_calories(profile, goal)
     
     total_calories = 0
     meal_list = []
@@ -619,30 +546,140 @@ async def daily_summary_handler(message: Message):
         f"⬜ Осталось: {remaining:.0f} ккал"
     )
     
-    await message.answer(summary, reply_markup=menu)
+    await message.answer(summary, reply_markup=main_menu)
 
-@dp.message(F.text == "Помощь")
-async def help_handler(message: Message):
-    """Показывает справку"""
+@dp.message(StateFilter(None), F.text == "❓ Помощь")
+async def help_button(message: Message):
+    """Нажатие кнопки 'Помощь'"""
     await message.answer(
-        "📖 Схема работы:\n"
-        "1) Нажми «Профиль» и введи данные тела.\n"
-        "2) Выбери цель.\n"
-        "3) Отправь фото блюда.\n"
-        "4) Получишь калории и сравнение с нормой.\n\n"
-        "📋 Команды:\n"
-        "/profile — заполнить профиль заново\n"
-        "/reset_profile — удалить профиль\n"
-        "/manual — ручной ввод порции\n"
-        "/help — справка\n\n"
-        "📊 История и Суточный итог — аналитика приемов пищи",
-        reply_markup=menu
+        "📖 Как пользоваться ботом:\n\n"
+        "1️⃣ Нажми 📊 Профиль → Создать профиль\n"
+        "2️⃣ Введи свои данные (пол, возраст, рост, вес, активность)\n"
+        "3️⃣ Выбери цель (Похудение/Поддержание/Набор)\n"
+        "4️⃣ Нажми 📸 Анализ блюда и отправь фото еды\n"
+        "5️⃣ Получи информацию о калориях и нутриентах\n"
+        "6️⃣ Проверяй 📈 Суточный итог, чтобы видеть сумму калорий за день\n\n"
+        "💡 Команды:\n"
+        "/manual — ручной ввод порции (если фото не распознано)\n"
+        "/start — главное меню",
+        reply_markup=main_menu
     )
 
-@dp.message(F.text == "Анализ блюда")
-async def analyze_hint(message: Message):
-    """Подсказка для анализа"""
-    await message.answer("📸 Теперь отправь мне фото блюда одним сообщением.", reply_markup=menu)
+# ==================== ОБРАБОТЧИКИ МЕНЮ ПРОФИЛЯ ====================
+
+@dp.message(F.text == "➕ Создать профиль")
+async def create_profile_button(message: Message, state: FSMContext):
+    """Создание нового профиля"""
+    await state.set_state(ProfileForm.sex)
+    await message.answer("Выбери пол:", reply_markup=gender_menu)
+
+@dp.message(F.text == "✏️ Редактировать профиль")
+async def edit_profile_button(message: Message, state: FSMContext):
+    """Редактирование профиля"""
+    profile = get_profile(message.from_user.id)
+    if not profile:
+        await message.answer("У тебя нет профиля для редактирования!", reply_markup=profile_menu)
+        return
+    
+    await state.set_state(ProfileForm.sex)
+    await message.answer("Выбери пол:", reply_markup=gender_menu)
+
+@dp.message(F.text == "🗑️ Удалить профиль")
+async def delete_profile_button(message: Message, state: FSMContext):
+    """Удаление профиля"""
+    delete_profile(message.from_user.id)
+    await state.clear()
+    await message.answer(
+        "🗑️ Профиль удален.\n\n"
+        "Нажми 📊 Профиль для создания нового.",
+        reply_markup=main_menu
+    )
+
+@dp.message(F.text == "◀️ Назад в меню")
+async def back_to_main_menu(message: Message, state: FSMContext):
+    """Возврат в главное меню"""
+    await state.clear()
+    await message.answer("Выбери действие:", reply_markup=main_menu)
+
+# ==================== ОБРАБОТЧИКИ ЗАПОЛНЕНИЯ ПРОФИЛЯ ====================
+
+@dp.message(ProfileForm.sex, F.text.in_(["Мужской", "Женский"]))
+async def profile_sex(message: Message, state: FSMContext):
+    """Ввод пола"""
+    await state.update_data(sex=message.text)
+    await state.set_state(ProfileForm.age)
+    await message.answer("Введи возраст числом (10-100):")
+
+@dp.message(ProfileForm.age)
+async def profile_age(message: Message, state: FSMContext):
+    """Ввод возраста"""
+    try:
+        age = int(message.text)
+        if age < 10 or age > 100:
+            raise ValueError
+    except Exception:
+        await message.answer("❌ Введи возраст числом от 10 до 100.")
+        return
+    await state.update_data(age=age)
+    await state.set_state(ProfileForm.height)
+    await message.answer("Введи рост в сантиметрах (100-250):")
+
+@dp.message(ProfileForm.height)
+async def profile_height(message: Message, state: FSMContext):
+    """Ввод роста"""
+    try:
+        height = float(message.text.replace(",", "."))
+        if height < 100 or height > 250:
+            raise ValueError
+    except Exception:
+        await message.answer("❌ Введи рост числом, например 175.")
+        return
+    await state.update_data(height=height)
+    await state.set_state(ProfileForm.weight)
+    await message.answer("Введи вес в килограммах (30-300):")
+
+@dp.message(ProfileForm.weight)
+async def profile_weight(message: Message, state: FSMContext):
+    """Ввод веса"""
+    try:
+        weight = float(message.text.replace(",", "."))
+        if weight < 30 or weight > 300:
+            raise ValueError
+    except Exception:
+        await message.answer("❌ Введи вес числом, например 72.5.")
+        return
+    await state.update_data(weight=weight)
+    await state.set_state(ProfileForm.activity)
+    await message.answer("Выбери уровень активности:", reply_markup=activity_menu)
+
+@dp.message(ProfileForm.activity)
+async def profile_activity(message: Message, state: FSMContext):
+    """Ввод активности"""
+    if message.text not in activity_map:
+        await message.answer("❌ Выбери активность из предложенных вариантов.")
+        return
+    await state.update_data(activity=message.text)
+    await state.set_state(ProfileForm.goal)
+    await message.answer("Выбери свою цель:", reply_markup=goal_menu)
+
+@dp.message(ProfileForm.goal)
+async def profile_goal(message: Message, state: FSMContext):
+    """Ввод цели"""
+    if message.text not in ["Похудение", "Поддержание", "Набор"]:
+        await message.answer("❌ Выбери цель из предложенных вариантов.")
+        return
+    
+    data = await state.get_data()
+    set_profile(message.from_user.id, data)
+    set_goal(message.from_user.id, message.text)
+    
+    await state.clear()
+    await message.answer(
+        f"✅ Профиль сохранен!\n\n"
+        f"{profile_summary(data, message.from_user.id)}\n"
+        f"Отлично! Теперь ты можешь анализировать блюда! 🍽️",
+        reply_markup=main_menu
+    )
 
 # ==================== ОБРАБОТЧИКИ РУЧНОГО ВВОДА ====================
 
@@ -651,32 +688,32 @@ async def manual_dish_name(message: Message, state: FSMContext):
     """Ввод названия блюда"""
     await state.update_data(dish_name=message.text)
     await state.set_state(PortionForm.calories_per_100)
-    await message.answer("📊 Введи калории на 100 г:")
+    await message.answer("📊 Введи калории на 100 г (число):")
 
 @dp.message(PortionForm.calories_per_100)
 async def manual_calories_per_100(message: Message, state: FSMContext):
     """Ввод калорий на 100г"""
     try:
         calories_per_100 = float(message.text.replace(",", "."))
+        if calories_per_100 <= 0:
+            raise ValueError
     except Exception:
-        await message.answer("❌ Введи число, например 150 или 150.5")
+        await message.answer("❌ Введи положительное число, например 150 или 150.5")
         return
     
     await state.update_data(calories_per_100=calories_per_100)
     await state.set_state(PortionForm.portion_grams)
-    await message.answer("⚖️ Введи вес порции в граммах:")
+    await message.answer("⚖️ Введи вес порции в граммах (число):")
 
 @dp.message(PortionForm.portion_grams)
 async def manual_portion_grams(message: Message, state: FSMContext):
     """Ввод веса порции"""
     try:
         portion_grams = float(message.text.replace(",", "."))
+        if portion_grams <= 0:
+            raise ValueError
     except Exception:
-        await message.answer("❌ Введи число, например 200 или 250.5")
-        return
-    
-    if portion_grams <= 0:
-        await message.answer("❌ Вес должен быть больше 0.")
+        await message.answer("❌ Введи положительное число, например 200 или 250.5")
         return
     
     data = await state.get_data()
@@ -695,15 +732,8 @@ async def manual_portion_grams(message: Message, state: FSMContext):
     
     profile = get_profile(message.from_user.id)
     if profile:
-        _, tdee = calculate_tdee(profile)
         goal = get_goal(message.from_user.id)
-        
-        if goal == "Похудение":
-            target = round(tdee - 400)
-        elif goal == "Набор":
-            target = round(tdee + 300)
-        else:
-            target = round(tdee)
+        target = get_target_calories(profile, goal)
         
         percent = round((total_calories / target) * 100, 1)
         result_text += f"\n\nЭто примерно {percent}% от твоей дневной нормы ({target} ккал)."
@@ -711,13 +741,21 @@ async def manual_portion_grams(message: Message, state: FSMContext):
     append_meal(message.from_user.id, result_text)
     await state.clear()
     
-    await message.answer(result_text, reply_markup=menu)
+    await message.answer(result_text, reply_markup=main_menu)
 
 # ==================== ОБРАБОТЧИК ФОТО ====================
 
-@dp.message(F.photo)
+@dp.message(StateFilter(None), F.photo)
 async def photo_handler(message: Message):
     """Обработка отправленного фото"""
+    profile = get_profile(message.from_user.id)
+    if not profile:
+        await message.answer(
+            "⚠️ Сначала создай профиль!",
+            reply_markup=main_menu
+        )
+        return
+    
     await message.answer("⏳ Фото получил. Сейчас анализирую блюдо...")
 
     try:
@@ -730,17 +768,9 @@ async def photo_handler(message: Message):
 
         calories, dish_name, result_text = analyze_image_with_logmeal(image_data)
 
-        profile = get_profile(message.from_user.id)
         if profile and calories is not None:
-            _, tdee = calculate_tdee(profile)
             goal = get_goal(message.from_user.id)
-
-            if goal == "Похудение":
-                target = round(tdee - 400)
-            elif goal == "Набор":
-                target = round(tdee + 300)
-            else:
-                target = round(tdee)
+            target = get_target_calories(profile, goal)
 
             percent = round((float(calories) / target) * 100, 1)
             result_text += f"\n\nЭто примерно {percent}% от твоей дневной нормы ({target} ккал)."
@@ -748,11 +778,17 @@ async def photo_handler(message: Message):
         append_meal(message.from_user.id, result_text)
 
         for part in split_text(result_text):
-            await message.answer(part, reply_markup=menu)
+            await message.answer(part)
+        
+        await message.answer("Выбери действие:", reply_markup=main_menu)
     
     except Exception as e:
         logger.exception(f"Photo handler error: {e}")
-        await message.answer(f"❌ Ошибка при обработке фото: {str(e)}\n\nПопробуй /manual для ручного ввода.", reply_markup=menu)
+        await message.answer(
+            f"❌ Ошибка при обработке фото: {str(e)}\n\n"
+            f"Используй /manual для ручного ввода.",
+            reply_markup=main_menu
+        )
 
 # ==================== ОБРАБОТЧИК ОСТАЛЬНОГО ====================
 
@@ -761,17 +797,25 @@ async def other_messages(message: Message):
     """Обработчик прочих сообщений"""
     await message.answer(
         "Я не понимаю это сообщение 🤔\n\n"
-        "Выбери «Профиль», затем цель, затем отправь фото блюда.\n\n"
-        "Или используй /manual для ручного ввода.",
-        reply_markup=menu
+        "Используй меню ниже 👇",
+        reply_markup=main_menu
     )
 
 # ==================== ГЛАВНАЯ ФУНКЦИЯ ====================
+
+async def set_bot_commands():
+    """Устанавливает команды бота"""
+    commands = [
+        BotCommand(command="start", description="Главное меню"),
+        BotCommand(command="manual", description="Ручной ввод порции"),
+    ]
+    await bot.set_my_commands(commands)
 
 async def main():
     """Главная функция запуска бота"""
     logger.info("🚀 Запуск бота...")
     load_state()
+    await set_bot_commands()
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("✅ Бот запущен и ожидает сообщений...")
     await dp.start_polling(bot)
