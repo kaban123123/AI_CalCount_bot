@@ -4,7 +4,9 @@ import os
 from pathlib import Path
 from datetime import datetime, timedelta
 import logging
+from collections import Counter
 
+import pandas as pd
 import requests
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command, StateFilter
@@ -21,6 +23,7 @@ from aiogram.types import (
     CallbackQuery,
     LabeledPrice,
     PreCheckoutQuery,
+    FSInputFile,
 )
 
 logging.basicConfig(
@@ -51,6 +54,8 @@ SETTINGS_FILE = DATA_DIR / "user_settings.json"
 FAVORITES_FILE = DATA_DIR / "favorites.json"
 ACTIVITY_FILE = DATA_DIR / "activity_log.json"
 SUBSCRIPTIONS_FILE = DATA_DIR / "subscriptions.json"
+ANALYTICS_FILE = DATA_DIR / "analytics_log.json"
+LAST_ACTIVITY_FILE = DATA_DIR / "last_activity.json"
 
 user_goals = {}
 user_profiles = {}
@@ -59,6 +64,8 @@ user_settings = {}
 favorites = {}
 activity_log = {}
 subscription_log = {}
+analytics_log = {}
+last_activity = {}
 
 SUBSCRIPTION_DAYS = 30
 
@@ -98,6 +105,7 @@ main_menu = ReplyKeyboardMarkup(
         [KeyboardButton(text="⭐ Избранное")],
         [KeyboardButton(text="📜 История")],
         [KeyboardButton(text="📈 Статистика")],
+        [KeyboardButton(text="📄 Отчет Excel")],
         [KeyboardButton(text="🏃 Упражнения")],
         [KeyboardButton(text="⭐ Premium")],
         [KeyboardButton(text="❓ Помощь")],
@@ -214,7 +222,7 @@ def save_json_file(path, data):
         logger.error(f"Ошибка сохранения {path}: {e}")
 
 def load_state():
-    global user_goals, user_profiles, meals_log, user_settings, favorites, activity_log, subscription_log
+    global user_goals, user_profiles, meals_log, user_settings, favorites, activity_log, subscription_log, analytics_log, last_activity
     user_goals = load_json_file(GOALS_FILE, {})
     user_profiles = load_json_file(PROFILE_FILE, {})
     meals_log = load_json_file(MEALS_FILE, {})
@@ -222,6 +230,8 @@ def load_state():
     favorites = load_json_file(FAVORITES_FILE, {})
     activity_log = load_json_file(ACTIVITY_FILE, {})
     subscription_log = load_json_file(SUBSCRIPTIONS_FILE, {})
+    analytics_log = load_json_file(ANALYTICS_FILE, {})
+    last_activity = load_json_file(LAST_ACTIVITY_FILE, {})
     logger.info("Состояние загружено")
 
 def save_state():
@@ -232,6 +242,23 @@ def save_state():
     save_json_file(FAVORITES_FILE, favorites)
     save_json_file(ACTIVITY_FILE, activity_log)
     save_json_file(SUBSCRIPTIONS_FILE, subscription_log)
+    save_json_file(ANALYTICS_FILE, analytics_log)
+    save_json_file(LAST_ACTIVITY_FILE, last_activity)
+
+def log_user_event(uid, event, meta=None):
+    key = str(uid)
+    analytics_log.setdefault(key, [])
+    analytics_log[key].append({
+        "timestamp": datetime.now().isoformat(),
+        "event": event,
+        "meta": meta or {},
+    })
+    analytics_log[key] = analytics_log[key][-500:]
+    save_state()
+
+def touch_user(uid):
+    last_activity[str(uid)] = datetime.now().isoformat()
+    save_state()
 
 def logmeal_headers():
     return {
@@ -247,11 +274,7 @@ def safe_json(resp):
 
 def extract_list(data):
     if isinstance(data, dict):
-        for key in [
-            "segmentationResults", "segmentation_results", "predictions",
-            "results", "dishPredictions", "foodSpots", "food_spots",
-            "segments", "items"
-        ]:
+        for key in ["segmentationResults", "segmentation_results", "predictions", "results", "dishPredictions", "foodSpots", "food_spots", "segments", "items"]:
             value = data.get(key)
             if isinstance(value, list) and value:
                 return value
@@ -286,21 +309,17 @@ def calculate_tdee(profile):
     height = profile.get("height")
     weight = profile.get("weight")
     activity = profile.get("activity")
-
     if sex not in ("Мужской", "Женский"):
         raise ValueError("Некорректный пол")
     if age is None or height is None or weight is None:
         raise ValueError("Профиль заполнен не полностью")
-
     age = float(age)
     height = float(height)
     weight = float(weight)
-
     if sex == "Мужской":
         bmr = 10 * weight + 6.25 * height - 5 * age + 5
     else:
         bmr = 10 * weight + 6.25 * height - 5 * age - 161
-
     tdee = bmr * activity_map.get(activity, 1.2)
     return round(bmr), round(tdee)
 
@@ -320,10 +339,7 @@ def get_daily_macros(profile, goal):
         p, f, c = 0.25, 0.25, 0.50
     else:
         p, f, c = 0.30, 0.30, 0.40
-    protein_g = round(target_cal * p / 4)
-    fat_g = round(target_cal * f / 9)
-    carbs_g = round(target_cal * c / 4)
-    return target_cal, protein_g, fat_g, carbs_g
+    return target_cal, round(target_cal * p / 4), round(target_cal * f / 9), round(target_cal * c / 4)
 
 def get_profile(uid):
     return user_profiles.get(str(uid), {})
@@ -334,7 +350,7 @@ def set_profile(uid, profile):
 
 def delete_profile(uid):
     key = str(uid)
-    for store in [user_profiles, user_goals, meals_log, favorites, user_settings, activity_log, subscription_log]:
+    for store in [user_profiles, user_goals, meals_log, favorites, user_settings, activity_log, subscription_log, analytics_log, last_activity]:
         store.pop(key, None)
     save_state()
 
@@ -370,8 +386,7 @@ def set_premium(uid, value=True, days=SUBSCRIPTION_DAYS):
     user_settings.setdefault(key, {})
     user_settings[key]["premium"] = bool(value)
     if value:
-        expires_at = (datetime.now() + timedelta(days=days)).isoformat()
-        subscription_log[key] = {"expires_at": expires_at}
+        subscription_log[key] = {"expires_at": (datetime.now() + timedelta(days=days)).isoformat()}
     else:
         subscription_log.pop(key, None)
     save_state()
@@ -381,23 +396,16 @@ def get_advice_limit(uid):
 
 def append_meal(uid, meal_entry):
     key = str(uid)
-    entry = {
-        "timestamp": datetime.now().isoformat(),
-        "date": datetime.now().strftime("%Y-%m-%d"),
-        "text": meal_entry,
-    }
+    entry = {"timestamp": datetime.now().isoformat(), "date": datetime.now().strftime("%Y-%m-%d"), "text": meal_entry}
     meals_log.setdefault(key, [])
     meals_log[key].append(entry)
     meals_log[key] = meals_log[key][-200:]
+    last_activity[key] = datetime.now().isoformat()
     save_state()
 
 def append_activity(uid, activity_entry):
     key = str(uid)
-    entry = {
-        "timestamp": datetime.now().isoformat(),
-        "date": datetime.now().strftime("%Y-%m-%d"),
-        "text": activity_entry,
-    }
+    entry = {"timestamp": datetime.now().isoformat(), "date": datetime.now().strftime("%Y-%m-%d"), "text": activity_entry}
     activity_log.setdefault(key, [])
     activity_log[key].append(entry)
     activity_log[key] = activity_log[key][-200:]
@@ -429,11 +437,7 @@ def extract_calories_from_text(text):
 def add_favorite(uid, dish_name, calories):
     key = str(uid)
     favorites.setdefault(key, [])
-    favorites[key].append({
-        "name": dish_name,
-        "calories": calories,
-        "added": datetime.now().isoformat(),
-    })
+    favorites[key].append({"name": dish_name, "calories": calories, "added": datetime.now().isoformat()})
     favorites[key] = favorites[key][-50:]
     save_state()
 
@@ -455,27 +459,15 @@ def profile_summary(profile, uid):
             if exp:
                 premium_text = f"Premium активен до: {exp.strftime('%Y-%m-%d %H:%M')}\n"
         return (
-            f"Пол: {profile.get('sex', '—')}\n"
-            f"Возраст: {profile.get('age', '—')}\n"
-            f"Рост: {profile.get('height', '—')} см\n"
-            f"Вес: {profile.get('weight', '—')} кг\n"
-            f"Активность: {profile.get('activity', '—')}\n"
-            f"Цель: {goal if goal else 'Не установлена'}\n"
-            f"BMR: {bmr} ккал\n"
-            f"TDEE: {tdee} ккал\n"
-            f"Дневная норма: {target} ккал\n"
-            f"{macros_text}"
-            f"{premium_text}"
+            f"Пол: {profile.get('sex', '—')}\nВозраст: {profile.get('age', '—')}\nРост: {profile.get('height', '—')} см\nВес: {profile.get('weight', '—')} кг\n"
+            f"Активность: {profile.get('activity', '—')}\nЦель: {goal if goal else 'Не установлена'}\n"
+            f"BMR: {bmr} ккал\nTDEE: {tdee} ккал\nДневная норма: {target} ккал\n{macros_text}{premium_text}"
         )
     except Exception:
         return (
-            f"Пол: {profile.get('sex', '—')}\n"
-            f"Возраст: {profile.get('age', '—')}\n"
-            f"Рост: {profile.get('height', '—')} см\n"
-            f"Вес: {profile.get('weight', '—')} кг\n"
-            f"Активность: {profile.get('activity', '—')}\n"
-            f"Цель: {get_goal(uid) if get_goal(uid) else 'Не установлена'}\n"
-            f"Профиль заполнен не полностью."
+            f"Пол: {profile.get('sex', '—')}\nВозраст: {profile.get('age', '—')}\nРост: {profile.get('height', '—')} см\n"
+            f"Вес: {profile.get('weight', '—')} кг\nАктивность: {profile.get('activity', '—')}\n"
+            f"Цель: {get_goal(uid) if get_goal(uid) else 'Не установлена'}\nПрофиль заполнен не полностью."
         )
 
 def get_statistics(uid, period="day"):
@@ -483,17 +475,11 @@ def get_statistics(uid, period="day"):
     if not profile:
         return "Профиль не найден"
     if period == "day":
-        meals = get_today_meals(uid)
-        period_name = "за день"
-        divider = 1
+        meals = get_today_meals(uid); period_name = "за день"; divider = 1
     elif period == "week":
-        meals = get_week_meals(uid)
-        period_name = "за неделю"
-        divider = 7
+        meals = get_week_meals(uid); period_name = "за неделю"; divider = 7
     else:
-        meals = get_month_meals(uid)
-        period_name = "за месяц"
-        divider = 30
+        meals = get_month_meals(uid); period_name = "за месяц"; divider = 30
     if not meals:
         return f"Нет данных {period_name}"
     total_calories = 0
@@ -506,11 +492,8 @@ def get_statistics(uid, period="day"):
     avg_per_day = total_calories / divider
     percent = round((total_calories / (target * divider)) * 100, 1) if target > 0 else 0
     return (
-        f"Статистика {period_name}\n\n"
-        f"Приемов пищи: {len(meals)}\n"
-        f"Всего калорий: {total_calories:.0f} ккал\n"
-        f"Среднее в день: {avg_per_day:.0f} ккал\n"
-        f"% от нормы: {percent}%\n"
+        f"Статистика {period_name}\n\nПриемов пищи: {len(meals)}\nВсего калорий: {total_calories:.0f} ккал\n"
+        f"Среднее в день: {avg_per_day:.0f} ккал\n% от нормы: {percent}%\n"
     )
 
 def get_smart_advice(uid, premium=False):
@@ -549,22 +532,37 @@ def get_smart_advice(uid, premium=False):
     return advice
 
 def format_advice(uid):
-    premium = refresh_premium_status(uid)
-    advice = get_smart_advice(uid, premium=premium)
+    advice = get_smart_advice(uid, premium=refresh_premium_status(uid))
     if not advice:
         return ""
     advice = advice[:get_advice_limit(uid)]
     return "\n".join([f"Совет: {x}" for x in advice])
 
+def premium_offer_text(uid):
+    if refresh_premium_status(uid):
+        exp = premium_expires_at(uid)
+        if exp:
+            days_left = max((exp - datetime.now()).days, 0)
+            return f"Premium активен ещё примерно {days_left} дн.\n\n• до 7 советов вместо 2\n• расширенная аналитика\n• напоминания о пропущенной еде\n• Excel-отчёты"
+        return "Premium активен."
+    return "Открой premium и получи:\n• до 7 умных советов вместо 2\n• расширенную аналитику привычек\n• напоминания о пропущенной еде\n• выгрузку отчётов в Excel"
+
+def guess_calories_by_name(dish_name):
+    s = dish_name.lower()
+    mapping = {
+        "греч": 110, "рис": 130, "овся": 120, "кур": 165, "котлет": 250, "суп": 60,
+        "борщ": 50, "омлет": 154, "яйц": 155, "салат": 80, "макар": 150, "творог": 98,
+        "сыр": 350, "хлеб": 250, "банан": 89, "яблок": 52, "рыб": 150, "карто": 85,
+    }
+    for k, v in mapping.items():
+        if k in s:
+            return float(v)
+    return 150.0
+
 def analyze_image_with_logmeal(image_bytes: bytes):
     try:
         files = {"image": ("meal.jpg", image_bytes, "image/jpeg")}
-        rec_response = requests.post(
-            "https://api.logmeal.com/v2/image/segmentation/complete",
-            headers=logmeal_headers(),
-            files=files,
-            timeout=120,
-        )
+        rec_response = requests.post("https://api.logmeal.com/v2/image/segmentation/complete", headers=logmeal_headers(), files=files, timeout=120)
         if rec_response.status_code == 429:
             return None, None, None, "Сервис распознавания временно недоступен из-за лимита запросов."
         if rec_response.status_code != 200:
@@ -591,12 +589,7 @@ def analyze_image_with_logmeal(image_bytes: bytes):
         calories = None
         protein = fat = carbs = fiber = sugar = None
         score = None
-        nutri_response = requests.post(
-            "https://api.logmeal.com/v2/nutrition/recipe/nutritionalInfo",
-            headers=logmeal_headers(),
-            json={"imageId": image_id},
-            timeout=120,
-        )
+        nutri_response = requests.post("https://api.logmeal.com/v2/nutrition/recipe/nutritionalInfo", headers=logmeal_headers(), json={"imageId": image_id}, timeout=120)
         if nutri_response.status_code == 429:
             return None, dish_name, None, "Сервис нутриентов временно недоступен из-за лимита запросов."
         if nutri_response.status_code == 200:
@@ -608,18 +601,12 @@ def analyze_image_with_logmeal(image_bytes: bytes):
                     lines.append("")
                     lines.append("Пищевая ценность на 100 г:")
                     lines.append(f"Калории: {calories} ккал")
-                    if protein is not None:
-                        lines.append(f"Белки: {protein} г")
-                    if fat is not None:
-                        lines.append(f"Жиры: {fat} г")
-                    if carbs is not None:
-                        lines.append(f"Углеводы: {carbs} г")
-                    if fiber is not None:
-                        lines.append(f"Клетчатка: {fiber} г")
-                    if sugar is not None:
-                        lines.append(f"Сахар: {sugar} г")
-                    if score:
-                        lines.append(f"Nutri-Score: {score}")
+                    if protein is not None: lines.append(f"Белки: {protein} г")
+                    if fat is not None: lines.append(f"Жиры: {fat} г")
+                    if carbs is not None: lines.append(f"Углеводы: {carbs} г")
+                    if fiber is not None: lines.append(f"Клетчатка: {fiber} г")
+                    if sugar is not None: lines.append(f"Сахар: {sugar} г")
+                    if score: lines.append(f"Nutri-Score: {score}")
         if calories is None:
             return None, dish_name, score, "Не удалось получить нутриенты для блюда."
         return calories, dish_name, score, "\n".join(lines)
@@ -627,9 +614,34 @@ def analyze_image_with_logmeal(image_bytes: bytes):
         logger.exception("Analysis error")
         return None, None, None, f"Ошибка анализа: {e}"
 
+def build_excel_report(uid):
+    rows = []
+    for meal in meals_log.get(str(uid), []):
+        cal = extract_calories_from_text(meal.get("text", ""))
+        rows.append({
+            "timestamp": meal.get("timestamp"),
+            "date": meal.get("date"),
+            "text": meal.get("text", "")[:200],
+            "calories": cal if cal is not None else 0,
+        })
+    df = pd.DataFrame(rows)
+    report_path = DATA_DIR / f"report_{uid}.xlsx"
+    with pd.ExcelWriter(report_path, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Meals")
+    return report_path
+
+def log_manual_entry(uid, dish_name, calories_100, grams, total_calories, result_text):
+    append_meal(uid, result_text)
+    last_activity[str(uid)] = datetime.now().isoformat()
+    save_state()
+    if dish_name:
+        add_favorite(uid, dish_name, total_calories)
+
 @dp.message(CommandStart())
 async def start_handler(message: Message, state: FSMContext):
     await state.clear()
+    touch_user(message.from_user.id)
+    log_user_event(message.from_user.id, "start")
     profile = get_profile(message.from_user.id)
     if profile:
         await message.answer(f"Привет, {message.from_user.first_name}!\n\n{profile_summary(profile, message.from_user.id)}", reply_markup=main_menu)
@@ -671,6 +683,23 @@ async def cmd_reset(message: Message, state: FSMContext):
     delete_profile(message.from_user.id)
     await message.answer("Профиль и данные удалены.", reply_markup=main_menu)
 
+@dp.message(Command("report"))
+async def report_command(message: Message):
+    if not get_profile(message.from_user.id):
+        await message.answer("Сначала создай профиль.")
+        return
+    path = build_excel_report(message.from_user.id)
+    await message.answer_document(FSInputFile(str(path)), caption="Вот твой Excel-отчёт по калориям.")
+
+@dp.message(Command("analytics"))
+async def analytics_command(message: Message):
+    stats = Counter([e["event"] for e in analytics_log.get(str(message.from_user.id), [])])
+    if not stats:
+        await message.answer("Пока нет активности.")
+        return
+    text = "Твоя активность:\n\n" + "\n".join([f"{k}: {v}" for k, v in stats.items()])
+    await message.answer(text)
+
 @dp.message(StateFilter(None), F.text == "📊 Профиль")
 async def profile_button(message: Message):
     profile = get_profile(message.from_user.id)
@@ -684,28 +713,20 @@ async def analyze_button(message: Message):
     if not get_profile(message.from_user.id):
         await message.answer("Сначала создай профиль.", reply_markup=main_menu)
         return
+    log_user_event(message.from_user.id, "open_photo_analysis")
     await message.answer("Теперь отправь фото блюда.")
 
 @dp.message(StateFilter(None), F.text == "✍️ Ручной ввод")
 async def manual_button(message: Message, state: FSMContext):
     await state.clear()
     await state.set_state(PortionForm.dish_name)
+    log_user_event(message.from_user.id, "open_manual_input")
     await message.answer("Введи название блюда:", reply_markup=ReplyKeyboardRemove())
 
 @dp.message(StateFilter(None), F.text == "⭐ Premium")
 async def premium_button(message: Message):
-    if refresh_premium_status(message.from_user.id):
-        exp = premium_expires_at(message.from_user.id)
-        left = (exp - datetime.now()).days if exp else 0
-        await message.answer(f"Premium уже активен. Осталось примерно {left} дн.", reply_markup=main_menu)
-        return
-    await message.answer(
-        "Premium открывает:\n"
-        "• до 7 советов вместо 2\n"
-        "• расширенный разбор дня\n"
-        "• более точные подсказки по БЖУ\n",
-        reply_markup=premium_menu,
-    )
+    log_user_event(message.from_user.id, "premium_opened")
+    await message.answer(premium_offer_text(message.from_user.id), reply_markup=premium_menu)
 
 @dp.callback_query(F.data == "buy_premium")
 async def buy_premium_callback(callback: CallbackQuery):
@@ -723,23 +744,19 @@ async def buy_premium_callback(callback: CallbackQuery):
 @dp.callback_query(F.data == "test_premium")
 async def test_premium_callback(callback: CallbackQuery):
     set_premium(callback.from_user.id, True, days=3)
+    log_user_event(callback.from_user.id, "premium_test_activated")
     await callback.answer("Тестовый premium активирован")
     await callback.message.answer("Тестовый premium включен на 3 дня.", reply_markup=main_menu)
 
 @dp.pre_checkout_query()
 async def pre_checkout_handler(pre_checkout_query: PreCheckoutQuery):
-    try:
-        await pre_checkout_query.answer(ok=True)
-    except Exception as e:
-        logger.error(f"pre_checkout error: {e}")
+    await pre_checkout_query.answer(ok=True)
 
 @dp.message(F.successful_payment)
 async def successful_payment_handler(message: Message):
     set_premium(message.from_user.id, True, days=SUBSCRIPTION_DAYS)
-    await message.answer(
-        f"Оплата получена. Premium активирован на {SUBSCRIPTION_DAYS} дней.",
-        reply_markup=main_menu
-    )
+    log_user_event(message.from_user.id, "premium_paid")
+    await message.answer(f"Оплата получена. Premium активирован на {SUBSCRIPTION_DAYS} дней.", reply_markup=main_menu)
 
 @dp.message(StateFilter(None), F.text == "⭐ Избранное")
 async def favorites_button(message: Message):
@@ -769,6 +786,14 @@ async def statistics_button(message: Message):
         return
     await message.answer("Выбери период:", reply_markup=period_menu)
 
+@dp.message(StateFilter(None), F.text == "📄 Отчет Excel")
+async def excel_report_button(message: Message):
+    if not get_profile(message.from_user.id):
+        await message.answer("Сначала создай профиль.", reply_markup=main_menu)
+        return
+    path = build_excel_report(message.from_user.id)
+    await message.answer_document(FSInputFile(str(path)), caption="Вот твой Excel-отчёт по калориям.")
+
 @dp.message(StateFilter(None), F.text == "📅 За день")
 async def stats_day(message: Message):
     await message.answer(get_statistics(message.from_user.id, "day"), reply_markup=main_menu)
@@ -792,8 +817,8 @@ async def exercise_button(message: Message, state: FSMContext):
 @dp.message(StateFilter(None), F.text == "❓ Помощь")
 async def help_button(message: Message):
     await message.answer(
-        "Профиль, анализ блюд, ручной ввод, избранное, история, статистика, упражнения.\n"
-        "Команды: /manual, /profile, /goal, /stats, /week, /reset",
+        "Профиль, анализ блюд, ручной ввод, избранное, история, статистика, отчёт Excel, упражнения.\n"
+        "Команды: /manual, /profile, /goal, /stats, /week, /report, /analytics, /reset",
         reply_markup=main_menu,
     )
 
@@ -889,6 +914,7 @@ async def profile_goal(message: Message, state: FSMContext):
         return
     set_profile(message.from_user.id, data)
     set_goal(message.from_user.id, message.text)
+    log_user_event(message.from_user.id, "profile_created")
     await state.clear()
     await message.answer(f"Профиль сохранен.\n\n{profile_summary(data, message.from_user.id)}", reply_markup=main_menu)
 
@@ -928,11 +954,7 @@ async def exercise_duration(message: Message, state: FSMContext):
     profile = get_profile(message.from_user.id)
     weight = float(profile.get("weight"))
     calories_burned = round((exercise_map[exercise] * weight * duration) / 60)
-    result_text = (
-        f"Упражнение: {exercise}\n"
-        f"Время: {duration} мин\n"
-        f"Сожжено: {calories_burned} ккал"
-    )
+    result_text = f"Упражнение: {exercise}\nВремя: {duration} мин\nСожжено: {calories_burned} ккал"
     append_activity(message.from_user.id, result_text)
     await state.clear()
     await message.answer(result_text, reply_markup=main_menu)
@@ -943,6 +965,8 @@ async def photo_handler(message: Message, state: FSMContext):
     if not profile:
         await message.answer("Сначала создай профиль.", reply_markup=main_menu)
         return
+    touch_user(message.from_user.id)
+    log_user_event(message.from_user.id, "photo_added")
     await message.answer("Анализирую блюдо...")
     try:
         photo = message.photo[-1]
@@ -967,9 +991,15 @@ async def photo_handler(message: Message, state: FSMContext):
 
 @dp.message(StateFilter(PortionForm.dish_name))
 async def manual_dish_name(message: Message, state: FSMContext):
-    await state.update_data(dish_name=message.text)
-    await state.set_state(PortionForm.calories_per_100)
-    await message.answer("Введи калории на 100 г:")
+    dish = message.text.strip()
+    calories_100 = guess_calories_by_name(dish)
+    await state.update_data(dish_name=dish, calories_per_100=calories_100)
+    await state.set_state(PortionForm.portion_grams)
+    await message.answer(
+        f"Для блюда «{dish}» я предлагаю {calories_100:.0f} ккал на 100 г.\n"
+        f"Если нужно — напиши другое значение.\n\n"
+        f"Если всё ок, просто отправь число грамм."
+    )
 
 @dp.message(StateFilter(PortionForm.calories_per_100))
 async def manual_calories_per_100(message: Message, state: FSMContext):
@@ -1004,20 +1034,11 @@ async def portion_grams_handler(message: Message, state: FSMContext):
     carbs = round(total_calories * 0.50 / 4)
 
     if base_text:
-        result_text = (
-            base_text
-            + f"\n\nВес порции: {portion_grams:.0f} г"
-            + f"\nИтого: {total_calories:.0f} ккал"
-            + f"\nБЖУ (примерно): Б {protein} г / Ж {fat} г / У {carbs} г"
-        )
+        result_text = base_text + f"\n\nВес порции: {portion_grams:.0f} г" + f"\nИтого: {total_calories:.0f} ккал" + f"\nБЖУ (примерно): Б {protein} г / Ж {fat} г / У {carbs} г"
     else:
         result_text = (
-            f"Ручной ввод\n\n"
-            f"Блюдо: {dish_name}\n"
-            f"Калории на 100 г: {calories_per_100} ккал\n"
-            f"Порция: {portion_grams:.0f} г\n"
-            f"Итого: {total_calories:.0f} ккал\n"
-            f"БЖУ (примерно): Б {protein} г / Ж {fat} г / У {carbs} г"
+            f"Ручной ввод\n\nБлюдо: {dish_name}\nКалории на 100 г: {calories_per_100} ккал\n"
+            f"Порция: {portion_grams:.0f} г\nИтого: {total_calories:.0f} ккал\nБЖУ (примерно): Б {protein} г / Ж {fat} г / У {carbs} г"
         )
 
     if nutri_score:
@@ -1035,10 +1056,8 @@ async def portion_grams_handler(message: Message, state: FSMContext):
     if advice_text:
         result_text += f"\n\n{advice_text}"
 
-    append_meal(message.from_user.id, result_text)
-
-    if dish_name:
-        add_favorite(message.from_user.id, dish_name, total_calories)
+    log_manual_entry(message.from_user.id, dish_name, calories_per_100, portion_grams, total_calories, result_text)
+    log_user_event(message.from_user.id, "manual_meal_added", {"dish": dish_name, "calories_100": calories_per_100, "grams": portion_grams})
 
     await state.clear()
     for part in split_text(result_text):
@@ -1050,11 +1069,7 @@ async def other_messages(message: Message):
 
 async def notify_subscription_end(user_id: int):
     try:
-        await bot.send_message(
-            user_id,
-            "Подписка premium закончилась. Доступ к расширенным советам отключен.",
-            reply_markup=main_menu,
-        )
+        await bot.send_message(user_id, "Подписка premium закончилась. Доступ к расширенным советам отключен.", reply_markup=main_menu)
     except Exception as e:
         logger.error(f"Notify error for {user_id}: {e}")
 
@@ -1073,15 +1088,37 @@ async def check_subscription_expirations():
             if now >= exp_dt:
                 if user_settings.get(uid, {}).get("premium"):
                     user_settings[uid]["premium"] = False
-                    try:
-                        await notify_subscription_end(int(uid))
-                    except Exception:
-                        pass
+                    await notify_subscription_end(int(uid))
                     changed = True
                 subscription_log.pop(uid, None)
                 changed = True
         if changed:
             save_state()
+        await asyncio.sleep(3600)
+
+async def check_missed_meals():
+    while True:
+        now = datetime.now()
+        for uid in list(user_profiles.keys()):
+            if not get_profile(int(uid)):
+                continue
+            if not refresh_premium_status(int(uid)):
+                continue
+            last = last_activity.get(uid)
+            if not last:
+                continue
+            try:
+                last_dt = datetime.fromisoformat(last)
+            except Exception:
+                continue
+            hours = (now - last_dt).total_seconds() / 3600
+            if hours >= 8:
+                try:
+                    await bot.send_message(int(uid), "Напоминание: давно не было записи еды. Лучше добавить приём пищи, чтобы статистика была точнее.", reply_markup=main_menu)
+                    last_activity[uid] = now.isoformat()
+                    save_state()
+                except Exception as e:
+                    logger.error(f"Missed meal notify error for {uid}: {e}")
         await asyncio.sleep(3600)
 
 async def set_bot_commands():
@@ -1092,6 +1129,8 @@ async def set_bot_commands():
         BotCommand(command="stats", description="Статистика за день"),
         BotCommand(command="week", description="Статистика за неделю"),
         BotCommand(command="manual", description="Ручной ввод"),
+        BotCommand(command="report", description="Excel-отчет"),
+        BotCommand(command="analytics", description="Аналитика"),
         BotCommand(command="reset", description="Сброс профиля"),
     ])
 
@@ -1099,6 +1138,7 @@ async def main():
     load_state()
     await set_bot_commands()
     asyncio.create_task(check_subscription_expirations())
+    asyncio.create_task(check_missed_meals())
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
