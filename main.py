@@ -28,12 +28,9 @@ API_TOKEN = os.environ.get("TG_TOKEN", "").strip()
 LOGMEAL_TOKEN = os.environ.get("LOGMEAL_TOKEN", "").strip()
 
 if not API_TOKEN:
-    logger.error("TG_TOKEN не установлен!")
-    raise SystemExit(1)
-
+    raise SystemExit("TG_TOKEN не установлен")
 if not LOGMEAL_TOKEN:
-    logger.error("LOGMEAL_TOKEN не установлен!")
-    raise SystemExit(1)
+    raise SystemExit("LOGMEAL_TOKEN не установлен")
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
@@ -81,6 +78,7 @@ main_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📊 Профиль")],
         [KeyboardButton(text="📸 Анализ блюда")],
+        [KeyboardButton(text="✍️ Ручной ввод")],
         [KeyboardButton(text="⭐ Избранное")],
         [KeyboardButton(text="📜 История")],
         [KeyboardButton(text="📈 Статистика")],
@@ -99,7 +97,6 @@ profile_menu = ReplyKeyboardMarkup(
         [KeyboardButton(text="◀️ Назад в меню")],
     ],
     resize_keyboard=True,
-    is_persistent=True,
 )
 
 gender_menu = ReplyKeyboardMarkup(
@@ -262,8 +259,7 @@ def extract_nutrients(nutri_json):
     carbs = total.get("CHOCDF", {}).get("quantity")
     fiber = total.get("FIBTG", {}).get("quantity")
     sugar = total.get("SUGAR", {}).get("quantity")
-    score = nutri_json.get("image_nutri_score", {}).get("nutri_score_category")
-    return calories, protein, fat, carbs, fiber, sugar, score
+    return calories, protein, fat, carbs, fiber, sugar
 
 def calculate_tdee(profile):
     sex = profile.get("sex")
@@ -329,6 +325,9 @@ def set_goal(uid, goal):
 
 def get_goal(uid):
     return user_goals.get(str(uid))
+
+def is_premium(uid):
+    return bool(user_settings.get(str(uid), {}).get("premium", False))
 
 def append_meal(uid, meal_entry):
     key = str(uid)
@@ -396,12 +395,10 @@ def profile_summary(profile, uid):
         bmr, tdee = calculate_tdee(profile)
         goal = get_goal(uid)
         target = get_target_calories(profile, goal) if goal else tdee
-
         macros_text = ""
         if goal:
             _, p_g, f_g, c_g = get_daily_macros(profile, goal)
             macros_text = f"БЖУ в день: Б {p_g} г / Ж {f_g} г / У {c_g} г\n"
-
         return (
             f"Пол: {profile.get('sex', '—')}\n"
             f"Возраст: {profile.get('age', '—')}\n"
@@ -460,6 +457,49 @@ def get_statistics(uid, period="day"):
         f"% от нормы: {percent}%\n"
     )
 
+def get_smart_advice(uid, premium=False):
+    profile = get_profile(uid)
+    if not profile:
+        return []
+    goal = get_goal(uid)
+    if not goal:
+        return ["Сначала задай цель, чтобы советы были точнее."]
+    today_meals = get_today_meals(uid)
+    total_calories = 0
+    for meal in today_meals:
+        cal = extract_calories_from_text(meal.get("text", ""))
+        if cal is not None:
+            total_calories += cal
+    target = get_target_calories(profile, goal)
+    advice = []
+    if total_calories >= target * 0.9:
+        advice.append("Ты уже близко к дневной норме — следующий приём сделай лёгким.")
+    else:
+        advice.append("До дневной нормы ещё есть запас, не пропускай полноценный приём пищи.")
+    if goal == "Похудение":
+        advice.append("Для снижения веса держи ужин проще и следи за жирами.")
+    elif goal == "Набор":
+        advice.append("Для набора старайся равномерно распределять калории по дню.")
+    else:
+        advice.append("Поддержание идёт лучше, когда белок и калории распределены ровно.")
+    if premium:
+        advice.extend([
+            "Проверь баланс БЖУ в следующем приёме — это поможет сгладить перекосы дня.",
+            "Если сегодня был плотный обед, ужин лучше сделать белково-овощным.",
+            "Старайся не накапливать большую часть калорий на вечер.",
+            "Повтори удачный сценарий питания завтра — это укрепляет привычку.",
+            "Сейчас у тебя хороший момент, чтобы не добирать лишние жиры.",
+        ])
+    return advice
+
+def format_advice(uid):
+    advice = get_smart_advice(uid, premium=is_premium(uid))
+    if not advice:
+        return ""
+    limit = 7 if is_premium(uid) else 2
+    advice = advice[:limit]
+    return "\n".join([f"Совет: {x}" for x in advice])
+
 def analyze_image_with_logmeal(image_bytes: bytes):
     try:
         files = {"image": ("meal.jpg", image_bytes, "image/jpeg")}
@@ -469,21 +509,14 @@ def analyze_image_with_logmeal(image_bytes: bytes):
             files=files,
             timeout=120,
         )
-
         if rec_response.status_code == 429:
             retry_after = rec_response.headers.get("RateLimit-Reset") or rec_response.headers.get("retry-after")
-            return None, None, None, (
-                "Сервис распознавания временно недоступен из-за лимита запросов.\n"
-                + (f"Попробуй снова через {retry_after} сек." if retry_after else "Попробуй позже.")
-            )
-
+            return None, None, None, "Сервис распознавания временно недоступен из-за лимита запросов."
         if rec_response.status_code != 200:
             return None, None, None, f"Ошибка распознавания: {rec_response.status_code}"
-
         rec_json = safe_json(rec_response)
         image_id = None
         dish_name = None
-
         if isinstance(rec_json, dict):
             image_id = rec_json.get("imageId") or rec_json.get("image_id") or rec_json.get("id")
             items = extract_list(rec_json)
@@ -495,35 +528,27 @@ def analyze_image_with_logmeal(image_bytes: bytes):
                     dish_name = str(food_name[0])
                 elif isinstance(food_name, str) and food_name.strip():
                     dish_name = food_name.strip()
-
         if not image_id:
             return None, dish_name, None, "Не удалось получить данные по блюду."
-
         if not dish_name:
             dish_name = "Блюдо не распознано точно"
-
         lines = [f"Распознанное блюдо: {dish_name}"]
         calories = None
+        protein = fat = carbs = fiber = sugar = None
         score = None
-
         nutri_response = requests.post(
             "https://api.logmeal.com/v2/nutrition/recipe/nutritionalInfo",
             headers=logmeal_headers(),
             json={"imageId": image_id},
             timeout=120,
         )
-
         if nutri_response.status_code == 429:
-            retry_after = nutri_response.headers.get("RateLimit-Reset") or nutri_response.headers.get("retry-after")
-            return None, dish_name, None, (
-                "Сервис нутриентов временно недоступен из-за лимита запросов.\n"
-                + (f"Попробуй снова через {retry_after} сек." if retry_after else "Попробуй позже.")
-            )
-
+            return None, dish_name, None, "Сервис нутриентов временно недоступен из-за лимита запросов."
         if nutri_response.status_code == 200:
             nutri_json = safe_json(nutri_response)
             if isinstance(nutri_json, dict):
-                calories, protein, fat, carbs, fiber, sugar, score = extract_nutrients(nutri_json)
+                calories, protein, fat, carbs, fiber, sugar = extract_nutrients(nutri_json)
+                score = nutri_json.get("image_nutri_score", {}).get("nutri_score_category")
                 if calories is not None:
                     lines.append("")
                     lines.append("Пищевая ценность на 100 г:")
@@ -540,12 +565,9 @@ def analyze_image_with_logmeal(image_bytes: bytes):
                         lines.append(f"Сахар: {sugar} г")
                     if score:
                         lines.append(f"Nutri-Score: {score}")
-
         if calories is None:
             return None, dish_name, score, "Не удалось получить нутриенты для блюда."
-
         return calories, dish_name, score, "\n".join(lines)
-
     except Exception as e:
         logger.exception("Analysis error")
         return None, None, None, f"Ошибка анализа: {e}"
@@ -555,15 +577,9 @@ async def start_handler(message: Message, state: FSMContext):
     await state.clear()
     profile = get_profile(message.from_user.id)
     if profile:
-        await message.answer(
-            f"Привет, {message.from_user.first_name}!\n\nТвой профиль:\n\n{profile_summary(profile, message.from_user.id)}",
-            reply_markup=main_menu,
-        )
+        await message.answer(f"Привет, {message.from_user.first_name}!\n\n{profile_summary(profile, message.from_user.id)}", reply_markup=main_menu)
     else:
-        await message.answer(
-            "Привет! Я AI_CalCount_bot PRO.\nСначала создай профиль.",
-            reply_markup=main_menu,
-        )
+        await message.answer("Привет! Сначала создай профиль.", reply_markup=main_menu)
 
 @dp.message(Command("manual"))
 async def manual_input_command(message: Message, state: FSMContext):
@@ -614,6 +630,12 @@ async def analyze_button(message: Message):
         await message.answer("Сначала создай профиль.", reply_markup=main_menu)
         return
     await message.answer("Теперь отправь фото блюда.")
+
+@dp.message(StateFilter(None), F.text == "✍️ Ручной ввод")
+async def manual_button(message: Message, state: FSMContext):
+    await state.clear()
+    await state.set_state(PortionForm.dish_name)
+    await message.answer("Введи название блюда:", reply_markup=ReplyKeyboardRemove())
 
 @dp.message(StateFilter(None), F.text == "⭐ Избранное")
 async def favorites_button(message: Message):
@@ -666,7 +688,7 @@ async def exercise_button(message: Message, state: FSMContext):
 @dp.message(StateFilter(None), F.text == "❓ Помощь")
 async def help_button(message: Message):
     await message.answer(
-        "Профиль, анализ блюд, избранное, история, статистика, упражнения.\n"
+        "Профиль, анализ блюд, ручной ввод, избранное, история, статистика, упражнения.\n"
         "Команды: /manual, /profile, /goal, /stats, /week, /reset",
         reply_markup=main_menu,
     )
@@ -756,21 +778,15 @@ async def profile_activity(message: Message, state: FSMContext):
 @dp.message(StateFilter(ProfileForm.goal), F.text.in_(["Похудение", "Поддержание", "Набор"]))
 async def profile_goal(message: Message, state: FSMContext):
     data = await state.get_data()
-
     required_keys = ["sex", "age", "height", "weight", "activity"]
     if any(data.get(k) is None for k in required_keys):
         await message.answer("Профиль заполнен не полностью. Начни создание профиля заново.")
         await state.clear()
         return
-
     set_profile(message.from_user.id, data)
     set_goal(message.from_user.id, message.text)
-
     await state.clear()
-    await message.answer(
-        f"Профиль сохранен.\n\n{profile_summary(data, message.from_user.id)}",
-        reply_markup=main_menu,
-    )
+    await message.answer(f"Профиль сохранен.\n\n{profile_summary(data, message.from_user.id)}", reply_markup=main_menu)
 
 @dp.message(StateFilter(DeleteProfileForm.confirm), F.text == "✅ Да, удалить")
 async def confirm_delete_profile(message: Message, state: FSMContext):
@@ -823,24 +839,16 @@ async def photo_handler(message: Message, state: FSMContext):
     if not profile:
         await message.answer("Сначала создай профиль.", reply_markup=main_menu)
         return
-
     await message.answer("Анализирую блюдо...")
-
     try:
         photo = message.photo[-1]
         file = await bot.get_file(photo.file_id)
         file_bytes = await bot.download_file(file.file_path)
         image_data = file_bytes.read()
-
         calories_100, dish_name, score, base_text = analyze_image_with_logmeal(image_data)
-
         if calories_100 is None:
-            await message.answer(
-                base_text or "Не удалось распознать блюдо. Попробуй другое фото или /manual.",
-                reply_markup=main_menu,
-            )
+            await message.answer(base_text or "Не удалось распознать блюдо. Попробуй другое фото или /manual.", reply_markup=main_menu)
             return
-
         await state.update_data(
             dish_name=dish_name,
             calories_per_100=calories_100,
@@ -848,12 +856,7 @@ async def photo_handler(message: Message, state: FSMContext):
             nutri_score=score,
         )
         await state.set_state(PortionForm.portion_grams)
-
-        await message.answer(
-            base_text + "\n\nНапиши, сколько примерно грамм было на тарелке (число).",
-            reply_markup=ReplyKeyboardRemove()
-        )
-
+        await message.answer(base_text + "\n\nНапиши, сколько примерно грамм было на тарелке (число).", reply_markup=ReplyKeyboardRemove())
     except Exception as e:
         logger.exception("Photo handler error")
         await message.answer(f"Ошибка обработки фото: {e}", reply_markup=main_menu)
@@ -886,20 +889,22 @@ async def portion_grams_handler(message: Message, state: FSMContext):
     except Exception:
         await message.answer("Введи положительное число грамм.")
         return
-
     data = await state.get_data()
     dish_name = data.get("dish_name", "Блюдо")
     calories_per_100 = float(data.get("calories_per_100", 0))
     base_text = data.get("base_text")
     nutri_score = data.get("nutri_score")
-
     total_calories = (calories_per_100 * portion_grams) / 100
+    protein = round(total_calories * 0.25 / 4)
+    fat = round(total_calories * 0.25 / 9)
+    carbs = round(total_calories * 0.50 / 4)
 
     if base_text:
         result_text = (
             base_text
             + f"\n\nВес порции: {portion_grams:.0f} г"
             + f"\nИтого: {total_calories:.0f} ккал"
+            + f"\nБЖУ (примерно): Б {protein} г / Ж {fat} г / У {carbs} г"
         )
     else:
         result_text = (
@@ -907,11 +912,12 @@ async def portion_grams_handler(message: Message, state: FSMContext):
             f"Блюдо: {dish_name}\n"
             f"Калории на 100 г: {calories_per_100} ккал\n"
             f"Порция: {portion_grams:.0f} г\n"
-            f"Итого: {total_calories:.0f} ккал"
+            f"Итого: {total_calories:.0f} ккал\n"
+            f"БЖУ (примерно): Б {protein} г / Ж {fat} г / У {carbs} г"
         )
 
     if nutri_score:
-        result_text += f"\nNutri-Score (для порции): {nutri_score}"
+        result_text += f"\nNutri-Score: {nutri_score}"
 
     profile = get_profile(message.from_user.id)
     if profile:
@@ -921,13 +927,16 @@ async def portion_grams_handler(message: Message, state: FSMContext):
             percent = round((total_calories / target) * 100, 1)
             result_text += f"\n\nЭто {percent}% от твоей нормы ({target} ккал)."
 
+    advice_text = format_advice(message.from_user.id)
+    if advice_text:
+        result_text += f"\n\n{advice_text}"
+
     append_meal(message.from_user.id, result_text)
 
     if dish_name:
         add_favorite(message.from_user.id, dish_name, total_calories)
 
     await state.clear()
-
     for part in split_text(result_text):
         await message.answer(part, reply_markup=main_menu)
 
