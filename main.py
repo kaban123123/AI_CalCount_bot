@@ -16,6 +16,11 @@ from aiogram.types import (
     KeyboardButton,
     BotCommand,
     ReplyKeyboardRemove,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    CallbackQuery,
+    LabeledPrice,
+    PreCheckoutQuery,
 )
 
 logging.basicConfig(
@@ -45,6 +50,7 @@ MEALS_FILE = DATA_DIR / "meals_log.json"
 SETTINGS_FILE = DATA_DIR / "user_settings.json"
 FAVORITES_FILE = DATA_DIR / "favorites.json"
 ACTIVITY_FILE = DATA_DIR / "activity_log.json"
+SUBSCRIPTIONS_FILE = DATA_DIR / "subscriptions.json"
 
 user_goals = {}
 user_profiles = {}
@@ -52,6 +58,9 @@ meals_log = {}
 user_settings = {}
 favorites = {}
 activity_log = {}
+subscription_log = {}
+
+SUBSCRIPTION_DAYS = 30
 
 activity_map = {
     "Сидячий образ жизни": 1.2,
@@ -74,6 +83,13 @@ exercise_map = {
     "Теннис": 7.0,
 }
 
+premium_menu = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [InlineKeyboardButton(text="⭐ Купить premium за Stars", callback_data="buy_premium")],
+        [InlineKeyboardButton(text="🎁 Тестовая активация premium", callback_data="test_premium")],
+    ]
+)
+
 main_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📊 Профиль")],
@@ -83,6 +99,7 @@ main_menu = ReplyKeyboardMarkup(
         [KeyboardButton(text="📜 История")],
         [KeyboardButton(text="📈 Статистика")],
         [KeyboardButton(text="🏃 Упражнения")],
+        [KeyboardButton(text="⭐ Premium")],
         [KeyboardButton(text="❓ Помощь")],
     ],
     resize_keyboard=True,
@@ -197,13 +214,14 @@ def save_json_file(path, data):
         logger.error(f"Ошибка сохранения {path}: {e}")
 
 def load_state():
-    global user_goals, user_profiles, meals_log, user_settings, favorites, activity_log
+    global user_goals, user_profiles, meals_log, user_settings, favorites, activity_log, subscription_log
     user_goals = load_json_file(GOALS_FILE, {})
     user_profiles = load_json_file(PROFILE_FILE, {})
     meals_log = load_json_file(MEALS_FILE, {})
     user_settings = load_json_file(SETTINGS_FILE, {})
     favorites = load_json_file(FAVORITES_FILE, {})
     activity_log = load_json_file(ACTIVITY_FILE, {})
+    subscription_log = load_json_file(SUBSCRIPTIONS_FILE, {})
     logger.info("Состояние загружено")
 
 def save_state():
@@ -213,6 +231,7 @@ def save_state():
     save_json_file(SETTINGS_FILE, user_settings)
     save_json_file(FAVORITES_FILE, favorites)
     save_json_file(ACTIVITY_FILE, activity_log)
+    save_json_file(SUBSCRIPTIONS_FILE, subscription_log)
 
 def logmeal_headers():
     return {
@@ -315,7 +334,7 @@ def set_profile(uid, profile):
 
 def delete_profile(uid):
     key = str(uid)
-    for store in [user_profiles, user_goals, meals_log, favorites, user_settings, activity_log]:
+    for store in [user_profiles, user_goals, meals_log, favorites, user_settings, activity_log, subscription_log]:
         store.pop(key, None)
     save_state()
 
@@ -328,6 +347,37 @@ def get_goal(uid):
 
 def is_premium(uid):
     return bool(user_settings.get(str(uid), {}).get("premium", False))
+
+def premium_expires_at(uid):
+    data = subscription_log.get(str(uid), {})
+    expires_at = data.get("expires_at")
+    if not expires_at:
+        return None
+    try:
+        return datetime.fromisoformat(expires_at)
+    except Exception:
+        return None
+
+def refresh_premium_status(uid):
+    exp = premium_expires_at(uid)
+    if exp and datetime.now() >= exp:
+        set_premium(uid, False)
+        return False
+    return is_premium(uid)
+
+def set_premium(uid, value=True, days=SUBSCRIPTION_DAYS):
+    key = str(uid)
+    user_settings.setdefault(key, {})
+    user_settings[key]["premium"] = bool(value)
+    if value:
+        expires_at = (datetime.now() + timedelta(days=days)).isoformat()
+        subscription_log[key] = {"expires_at": expires_at}
+    else:
+        subscription_log.pop(key, None)
+    save_state()
+
+def get_advice_limit(uid):
+    return 7 if refresh_premium_status(uid) else 2
 
 def append_meal(uid, meal_entry):
     key = str(uid)
@@ -399,6 +449,11 @@ def profile_summary(profile, uid):
         if goal:
             _, p_g, f_g, c_g = get_daily_macros(profile, goal)
             macros_text = f"БЖУ в день: Б {p_g} г / Ж {f_g} г / У {c_g} г\n"
+        premium_text = ""
+        if refresh_premium_status(uid):
+            exp = premium_expires_at(uid)
+            if exp:
+                premium_text = f"Premium активен до: {exp.strftime('%Y-%m-%d %H:%M')}\n"
         return (
             f"Пол: {profile.get('sex', '—')}\n"
             f"Возраст: {profile.get('age', '—')}\n"
@@ -410,6 +465,7 @@ def profile_summary(profile, uid):
             f"TDEE: {tdee} ккал\n"
             f"Дневная норма: {target} ккал\n"
             f"{macros_text}"
+            f"{premium_text}"
         )
     except Exception:
         return (
@@ -493,11 +549,11 @@ def get_smart_advice(uid, premium=False):
     return advice
 
 def format_advice(uid):
-    advice = get_smart_advice(uid, premium=is_premium(uid))
+    premium = refresh_premium_status(uid)
+    advice = get_smart_advice(uid, premium=premium)
     if not advice:
         return ""
-    limit = 7 if is_premium(uid) else 2
-    advice = advice[:limit]
+    advice = advice[:get_advice_limit(uid)]
     return "\n".join([f"Совет: {x}" for x in advice])
 
 def analyze_image_with_logmeal(image_bytes: bytes):
@@ -510,7 +566,6 @@ def analyze_image_with_logmeal(image_bytes: bytes):
             timeout=120,
         )
         if rec_response.status_code == 429:
-            retry_after = rec_response.headers.get("RateLimit-Reset") or rec_response.headers.get("retry-after")
             return None, None, None, "Сервис распознавания временно недоступен из-за лимита запросов."
         if rec_response.status_code != 200:
             return None, None, None, f"Ошибка распознавания: {rec_response.status_code}"
@@ -636,6 +691,55 @@ async def manual_button(message: Message, state: FSMContext):
     await state.clear()
     await state.set_state(PortionForm.dish_name)
     await message.answer("Введи название блюда:", reply_markup=ReplyKeyboardRemove())
+
+@dp.message(StateFilter(None), F.text == "⭐ Premium")
+async def premium_button(message: Message):
+    if refresh_premium_status(message.from_user.id):
+        exp = premium_expires_at(message.from_user.id)
+        left = (exp - datetime.now()).days if exp else 0
+        await message.answer(f"Premium уже активен. Осталось примерно {left} дн.", reply_markup=main_menu)
+        return
+    await message.answer(
+        "Premium открывает:\n"
+        "• до 7 советов вместо 2\n"
+        "• расширенный разбор дня\n"
+        "• более точные подсказки по БЖУ\n",
+        reply_markup=premium_menu,
+    )
+
+@dp.callback_query(F.data == "buy_premium")
+async def buy_premium_callback(callback: CallbackQuery):
+    await callback.answer()
+    prices = [LabeledPrice(label="Premium на 30 дней", amount=100)]
+    await bot.send_invoice(
+        chat_id=callback.message.chat.id,
+        title="Premium на 30 дней",
+        description="Расширенные советы, больше лимитов и персональный разбор",
+        payload=f"premium_{callback.from_user.id}_{datetime.now().timestamp()}",
+        currency="XTR",
+        prices=prices,
+    )
+
+@dp.callback_query(F.data == "test_premium")
+async def test_premium_callback(callback: CallbackQuery):
+    set_premium(callback.from_user.id, True, days=3)
+    await callback.answer("Тестовый premium активирован")
+    await callback.message.answer("Тестовый premium включен на 3 дня.", reply_markup=main_menu)
+
+@dp.pre_checkout_query()
+async def pre_checkout_handler(pre_checkout_query: PreCheckoutQuery):
+    try:
+        await pre_checkout_query.answer(ok=True)
+    except Exception as e:
+        logger.error(f"pre_checkout error: {e}")
+
+@dp.message(F.successful_payment)
+async def successful_payment_handler(message: Message):
+    set_premium(message.from_user.id, True, days=SUBSCRIPTION_DAYS)
+    await message.answer(
+        f"Оплата получена. Premium активирован на {SUBSCRIPTION_DAYS} дней.",
+        reply_markup=main_menu
+    )
 
 @dp.message(StateFilter(None), F.text == "⭐ Избранное")
 async def favorites_button(message: Message):
@@ -944,6 +1048,42 @@ async def portion_grams_handler(message: Message, state: FSMContext):
 async def other_messages(message: Message):
     await message.answer("Используй меню ниже.", reply_markup=main_menu)
 
+async def notify_subscription_end(user_id: int):
+    try:
+        await bot.send_message(
+            user_id,
+            "Подписка premium закончилась. Доступ к расширенным советам отключен.",
+            reply_markup=main_menu,
+        )
+    except Exception as e:
+        logger.error(f"Notify error for {user_id}: {e}")
+
+async def check_subscription_expirations():
+    while True:
+        now = datetime.now()
+        changed = False
+        for uid, data in list(subscription_log.items()):
+            exp = data.get("expires_at")
+            if not exp:
+                continue
+            try:
+                exp_dt = datetime.fromisoformat(exp)
+            except Exception:
+                continue
+            if now >= exp_dt:
+                if user_settings.get(uid, {}).get("premium"):
+                    user_settings[uid]["premium"] = False
+                    try:
+                        await notify_subscription_end(int(uid))
+                    except Exception:
+                        pass
+                    changed = True
+                subscription_log.pop(uid, None)
+                changed = True
+        if changed:
+            save_state()
+        await asyncio.sleep(3600)
+
 async def set_bot_commands():
     await bot.set_my_commands([
         BotCommand(command="start", description="Главное меню"),
@@ -958,6 +1098,7 @@ async def set_bot_commands():
 async def main():
     load_state()
     await set_bot_commands()
+    asyncio.create_task(check_subscription_expirations())
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
