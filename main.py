@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import random
 from pathlib import Path
 from datetime import datetime, timedelta
 import logging
@@ -56,6 +57,7 @@ ACTIVITY_FILE = DATA_DIR / "activity_log.json"
 SUBSCRIPTIONS_FILE = DATA_DIR / "subscriptions.json"
 ANALYTICS_FILE = DATA_DIR / "analytics_log.json"
 LAST_ACTIVITY_FILE = DATA_DIR / "last_activity.json"
+LAST_TIP_FILE = DATA_DIR / "last_tip.json"
 
 user_goals = {}
 user_profiles = {}
@@ -66,6 +68,7 @@ activity_log = {}
 subscription_log = {}
 analytics_log = {}
 last_activity = {}
+last_tip_time = {}
 
 SUBSCRIPTION_DAYS = 30
 
@@ -94,6 +97,13 @@ premium_menu = InlineKeyboardMarkup(
     inline_keyboard=[
         [InlineKeyboardButton(text="⭐ Купить premium за Stars", callback_data="buy_premium")],
         [InlineKeyboardButton(text="🎁 Тестовая активация premium", callback_data="test_premium")],
+    ]
+)
+
+edit_calories_kb = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ Изменить калории", callback_data="edit_calories")],
+        [InlineKeyboardButton(text="✅ Оставить как есть", callback_data="keep_calories")],
     ]
 )
 
@@ -222,7 +232,8 @@ def save_json_file(path, data):
         logger.error(f"Ошибка сохранения {path}: {e}")
 
 def load_state():
-    global user_goals, user_profiles, meals_log, user_settings, favorites, activity_log, subscription_log, analytics_log, last_activity
+    global user_goals, user_profiles, meals_log, user_settings, favorites, activity_log
+    global subscription_log, analytics_log, last_activity, last_tip_time
     user_goals = load_json_file(GOALS_FILE, {})
     user_profiles = load_json_file(PROFILE_FILE, {})
     meals_log = load_json_file(MEALS_FILE, {})
@@ -232,6 +243,7 @@ def load_state():
     subscription_log = load_json_file(SUBSCRIPTIONS_FILE, {})
     analytics_log = load_json_file(ANALYTICS_FILE, {})
     last_activity = load_json_file(LAST_ACTIVITY_FILE, {})
+    last_tip_time = load_json_file(LAST_TIP_FILE, {})
     logger.info("Состояние загружено")
 
 def save_state():
@@ -244,6 +256,7 @@ def save_state():
     save_json_file(SUBSCRIPTIONS_FILE, subscription_log)
     save_json_file(ANALYTICS_FILE, analytics_log)
     save_json_file(LAST_ACTIVITY_FILE, last_activity)
+    save_json_file(LAST_TIP_FILE, last_tip_time)
 
 def log_user_event(uid, event, meta=None):
     key = str(uid)
@@ -350,7 +363,7 @@ def set_profile(uid, profile):
 
 def delete_profile(uid):
     key = str(uid)
-    for store in [user_profiles, user_goals, meals_log, favorites, user_settings, activity_log, subscription_log, analytics_log, last_activity]:
+    for store in [user_profiles, user_goals, meals_log, favorites, user_settings, activity_log, subscription_log, analytics_log, last_activity, last_tip_time]:
         store.pop(key, None)
     save_state()
 
@@ -392,7 +405,7 @@ def set_premium(uid, value=True, days=SUBSCRIPTION_DAYS):
     save_state()
 
 def get_advice_limit(uid):
-    return 7 if refresh_premium_status(uid) else 2
+    return 2  # сейчас даём максимум 2 коротких совета
 
 def append_meal(uid, meal_entry):
     key = str(uid)
@@ -496,56 +509,92 @@ def get_statistics(uid, period="day"):
         f"Среднее в день: {avg_per_day:.0f} ккал\n% от нормы: {percent}%\n"
     )
 
-def get_smart_advice(uid, premium=False):
+def get_smart_advice(uid):
     profile = get_profile(uid)
     if not profile:
         return []
+
     goal = get_goal(uid)
-    if not goal:
-        return ["Сначала задай цель, чтобы советы были точнее."]
     today_meals = get_today_meals(uid)
     total_calories = 0
     for meal in today_meals:
         cal = extract_calories_from_text(meal.get("text", ""))
         if cal is not None:
             total_calories += cal
-    target = get_target_calories(profile, goal)
-    advice = []
-    if total_calories >= target * 0.9:
-        advice.append("Ты уже близко к дневной норме — следующий приём сделай лёгким.")
-    else:
-        advice.append("До дневной нормы ещё есть запас, не пропускай полноценный приём пищи.")
+
+    target = None
+    if goal:
+        try:
+            target = get_target_calories(profile, goal)
+        except Exception:
+            target = None
+
+    base_advices = []
+
+    if target and total_calories is not None:
+        if total_calories >= target * 1.1:
+            base_advices.append("Сегодня ты уже превысил норму — сделай следующий приём еды полегче.")
+        elif total_calories <= target * 0.7:
+            base_advices.append("До дневной нормы ещё запас — не пропускай полноценный приём пищи.")
+        else:
+            base_advices.append("Ты примерно в рамках дневной нормы — продолжай в том же духе.")
+
     if goal == "Похудение":
-        advice.append("Для снижения веса держи ужин проще и следи за жирами.")
+        base_advices.append("При похудении особенно следи за жирами на ужин и держи белок на хорошем уровне.")
     elif goal == "Набор":
-        advice.append("Для набора старайся равномерно распределять калории по дню.")
-    else:
-        advice.append("Поддержание идёт лучше, когда белок и калории распределены ровно.")
-    if premium:
-        advice.extend([
-            "Проверь баланс БЖУ в следующем приёме — это поможет сгладить перекосы дня.",
-            "Если сегодня был плотный обед, ужин лучше сделать белково-овощным.",
-            "Старайся не накапливать большую часть калорий на вечер.",
-            "Повтори удачный сценарий питания завтра — это укрепляет привычку.",
-            "Сейчас у тебя хороший момент, чтобы не добирать лишние жиры.",
-        ])
-    return advice
+        base_advices.append("При наборе веса не оставляй слишком много калорий на самый вечер, распределяй их по дню.")
+    elif goal == "Поддержание":
+        base_advices.append("Для поддержания веса полезно, когда приёмы пищи более-менее равномерны по времени.")
+
+    if not base_advices:
+        return []
+    n = min(get_advice_limit(uid), len(base_advices))
+    advices = random.sample(base_advices, k=n)
+    return advices
 
 def format_advice(uid):
-    advice = get_smart_advice(uid, premium=refresh_premium_status(uid))
-    if not advice:
+    advices = get_smart_advice(uid)
+    if not advices:
         return ""
-    advice = advice[:get_advice_limit(uid)]
-    return "\n".join([f"Совет: {x}" for x in advice])
+    return "\n".join([f"• {text}" for text in advices])
+
+def can_show_tips(uid, hours_interval=2):
+    key = str(uid)
+    last = last_tip_time.get(key)
+    if not last:
+        return True
+    try:
+        last_dt = datetime.fromisoformat(last)
+    except Exception:
+        return True
+    diff_hours = (datetime.now() - last_dt).total_seconds() / 3600
+    return diff_hours >= hours_interval
+
+def mark_tips_shown(uid):
+    last_tip_time[str(uid)] = datetime.now().isoformat()
+    save_state()
 
 def premium_offer_text(uid):
     if refresh_premium_status(uid):
         exp = premium_expires_at(uid)
         if exp:
             days_left = max((exp - datetime.now()).days, 0)
-            return f"Premium активен ещё примерно {days_left} дн.\n\n• до 7 советов вместо 2\n• расширенная аналитика\n• напоминания о пропущенной еде\n• Excel-отчёты"
+            return (
+                f"Premium активен ещё примерно {days_left} дн.\n\n"
+                "Что даёт premium:\n"
+                "• до 7 советов вместо 2\n"
+                "• расширенную аналитику\n"
+                "• напоминания о пропущенной еде\n"
+                "• выгрузку отчётов в Excel"
+            )
         return "Premium активен."
-    return "Открой premium и получи:\n• до 7 умных советов вместо 2\n• расширенную аналитику привычек\n• напоминания о пропущенной еде\n• выгрузку отчётов в Excel"
+    return (
+        "Открой premium и получи:\n"
+        "• до 7 умных советов вместо 2\n"
+        "• расширенную аналитику привычек\n"
+        "• напоминания о пропущенной еде\n"
+        "• выгрузку отчётов в Excel"
+    )
 
 def guess_calories_by_name(dish_name):
     s = dish_name.lower()
@@ -630,10 +679,8 @@ def build_excel_report(uid):
         df.to_excel(writer, index=False, sheet_name="Meals")
     return report_path
 
-def log_manual_entry(uid, dish_name, calories_100, grams, total_calories, result_text):
-    append_meal(uid, result_text)
-    last_activity[str(uid)] = datetime.now().isoformat()
-    save_state()
+def log_manual_entry(uid, dish_name, calories_100, grams, total_calories, core_text):
+    append_meal(uid, core_text)
     if dish_name:
         add_favorite(uid, dish_name, total_calories)
 
@@ -775,7 +822,7 @@ async def history_button(message: Message):
     if not items:
         await message.answer("История пока пустая.", reply_markup=main_menu)
         return
-    text = "Последние анализы:\n\n" + "\n\n".join([i.get("text", "") for i in items[-5:]])
+    text = "Последние приемы пищи:\n\n" + "\n\n".join([i.get("text", "") for i in items[-5:]])
     for part in split_text(text):
         await message.answer(part, reply_markup=main_menu)
 
@@ -994,11 +1041,28 @@ async def manual_dish_name(message: Message, state: FSMContext):
     dish = message.text.strip()
     calories_100 = guess_calories_by_name(dish)
     await state.update_data(dish_name=dish, calories_per_100=calories_100)
-    await state.set_state(PortionForm.portion_grams)
     await message.answer(
-        f"Для блюда «{dish}» я предлагаю {calories_100:.0f} ккал на 100 г.\n"
-        f"Если нужно — напиши другое значение.\n\n"
-        f"Если всё ок, просто отправь число грамм."
+        f"Для блюда «{dish}» я предлагаю {calories_100:.0f} ккал на 100 г.\n\n"
+        f"Можешь изменить это значение или оставить как есть.",
+        reply_markup=edit_calories_kb,
+    )
+
+@dp.callback_query(F.data == "edit_calories")
+async def edit_calories_callback(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(PortionForm.calories_per_100)
+    await callback.message.answer(
+        "Введи свои калории на 100 г (число), например 125.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+@dp.callback_query(F.data == "keep_calories")
+async def keep_calories_callback(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(PortionForm.portion_grams)
+    await callback.message.answer(
+        "Ок, оставляем так.\nТеперь введи вес порции в граммах:",
+        reply_markup=ReplyKeyboardRemove(),
     )
 
 @dp.message(StateFilter(PortionForm.calories_per_100))
@@ -1034,15 +1098,24 @@ async def portion_grams_handler(message: Message, state: FSMContext):
     carbs = round(total_calories * 0.50 / 4)
 
     if base_text:
-        result_text = base_text + f"\n\nВес порции: {portion_grams:.0f} г" + f"\nИтого: {total_calories:.0f} ккал" + f"\nБЖУ (примерно): Б {protein} г / Ж {fat} г / У {carbs} г"
+        core_text = (
+            base_text
+            + f"\n\nВес порции: {portion_grams:.0f} г"
+            + f"\nИтого: {total_calories:.0f} ккал"
+            + f"\nБЖУ (примерно): Б {protein} г / Ж {fat} г / У {carbs} г"
+        )
     else:
-        result_text = (
-            f"Ручной ввод\n\nБлюдо: {dish_name}\nКалории на 100 г: {calories_per_100} ккал\n"
-            f"Порция: {portion_grams:.0f} г\nИтого: {total_calories:.0f} ккал\nБЖУ (примерно): Б {protein} г / Ж {fat} г / У {carbs} г"
+        core_text = (
+            f"Ручной ввод\n\n"
+            f"Блюдо: {dish_name}\n"
+            f"Калории на 100 г: {calories_per_100} ккал\n"
+            f"Порция: {portion_grams:.0f} г\n"
+            f"Итого: {total_calories:.0f} ккал\n"
+            f"БЖУ (примерно): Б {protein} г / Ж {fat} г / У {carbs} г"
         )
 
     if nutri_score:
-        result_text += f"\nNutri-Score: {nutri_score}"
+        core_text += f"\nNutri-Score: {nutri_score}"
 
     profile = get_profile(message.from_user.id)
     if profile:
@@ -1050,18 +1123,21 @@ async def portion_grams_handler(message: Message, state: FSMContext):
         target = get_target_calories(profile, goal)
         if target:
             percent = round((total_calories / target) * 100, 1)
-            result_text += f"\n\nЭто {percent}% от твоей нормы ({target} ккал)."
+            core_text += f"\n\nЭто {percent}% от твоей нормы ({target} ккал)."
 
-    advice_text = format_advice(message.from_user.id)
-    if advice_text:
-        result_text += f"\n\n{advice_text}"
-
-    log_manual_entry(message.from_user.id, dish_name, calories_per_100, portion_grams, total_calories, result_text)
+    log_manual_entry(message.from_user.id, dish_name, calories_per_100, portion_grams, total_calories, core_text)
     log_user_event(message.from_user.id, "manual_meal_added", {"dish": dish_name, "calories_100": calories_per_100, "grams": portion_grams})
 
-    await state.clear()
-    for part in split_text(result_text):
+    for part in split_text(core_text):
         await message.answer(part, reply_markup=main_menu)
+
+    if can_show_tips(message.from_user.id):
+        advice_text = format_advice(message.from_user.id)
+        if advice_text:
+            await message.answer(f"Небольшие подсказки по дню:\n{advice_text}", reply_markup=main_menu)
+            mark_tips_shown(message.from_user.id)
+
+    await state.clear()
 
 @dp.message()
 async def other_messages(message: Message):
@@ -1114,7 +1190,11 @@ async def check_missed_meals():
             hours = (now - last_dt).total_seconds() / 3600
             if hours >= 8:
                 try:
-                    await bot.send_message(int(uid), "Напоминание: давно не было записи еды. Лучше добавить приём пищи, чтобы статистика была точнее.", reply_markup=main_menu)
+                    await bot.send_message(
+                        int(uid),
+                        "Напоминание: давно не было записи еды. Лучше добавить приём пищи, чтобы статистика была точнее.",
+                        reply_markup=main_menu,
+                    )
                     last_activity[uid] = now.isoformat()
                     save_state()
                 except Exception as e:
